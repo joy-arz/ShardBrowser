@@ -319,6 +319,9 @@ npm run tauri dev      # dev (hot reload)
 npm run tauri build    # release .app / .msi / .AppImage in src-tauri/target/release/bundle/
 ```
 
+Full prerequisites and the Windows `.exe` build (installer + portable binary)
+are in **[SETUP.md](SETUP.md)**.
+
 ### First launch
 
 The app downloads the patched browser (~150 MB), Widevine (~16 MB) and
