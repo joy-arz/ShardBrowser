@@ -6,9 +6,12 @@ import { DownloadIcon } from "../../shared/icons";
 import { Topbar } from "../../shared/ui/Topbar";
 import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
+import { confirmModal } from "../../shared/lib/confirm";
+import { Badge } from "../../shared/ui";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo } from "../../entities/settings";
 import { settingsGet, settingsSave, apiInfo, apiRegenerateToken, mcpDownload } from "../../entities/settings";
+import { portableStatus, portableEnable, type PortableStatus } from "../../entities/portable";
 
 function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -27,10 +30,42 @@ export function SettingsPage() {
     screen_resolution_mode: "fingerprint",
     api_enabled: true,
     api_port: 40325,
+    portable_local_cache: true,
   });
   const [api, setApi] = useState<ApiInfo | null>(null);
   const refreshApi = () => apiInfo().then(setApi).catch(() => {});
-  useEffect(() => { settingsGet().then(setS); refreshApi(); }, []);
+  const [portable, setPortable] = useState<PortableStatus | null>(null);
+  const refreshPortable = () => portableStatus().then(setPortable).catch(() => {});
+  useEffect(() => { settingsGet().then(setS); refreshApi(); refreshPortable(); }, []);
+
+  const [portableBusy, setPortableBusy] = useState(false);
+  // Create ShardXData next to the app + copy current data in. User then moves
+  // the app + folder to the drive and relaunches.
+  const makePortable = async () => {
+    const ok = await confirmModal({
+      title: "Make this install portable",
+      message:
+        "This creates a ShardXData folder next to the app and copies your current profiles, " +
+        "cookies, proxies and settings into it. When it finishes, quit the app and move BOTH " +
+        "the app and the ShardXData folder onto your USB drive together, then relaunch from the " +
+        "drive. The one-time browser engine download stays on this PC.",
+      buttons: [
+        { label: "Cancel", value: false },
+        { label: "Create ShardXData", value: true, primary: true },
+      ],
+    });
+    if (ok !== true) return;
+    setPortableBusy(true);
+    try {
+      const path = await portableEnable();
+      toast.ok(`Created ${path}. Move the app + ShardXData to your drive together, then relaunch.`);
+      refreshPortable();
+    } catch (e) {
+      toast.err("Couldn't enable Portable Mode: " + String(e));
+    } finally {
+      setPortableBusy(false);
+    }
+  };
   const regenToken = async () => {
     try { setApi(await apiRegenerateToken()); toast.ok("Token regenerated"); }
     catch (e) { toast.err(String(e)); }
@@ -58,6 +93,67 @@ export function SettingsPage() {
       <div className="mb-3.5 flex items-end justify-between gap-4">
         <h1 className="m-0 text-title-h5 text-text-strong-950">Settings</h1>
       </div>
+
+      <SettingsCard title="Portable Mode">
+        {portable?.active ? (
+          <>
+            <div className="mb-2 flex items-center gap-2">
+              <Badge color="warning" variant="light" size="small">PORTABLE</Badge>
+              <span className="text-paragraph-xs text-text-soft-400">
+                Running from a portable data folder — your profiles and settings live on the drive, not this PC.
+              </span>
+            </div>
+            <div className="mb-3 rounded-md bg-bg-weak-50 p-2.5 text-paragraph-xs text-text-sub-600">
+              <div>
+                <strong>Data root:</strong>{" "}
+                <code className="break-all">{portable.data_root}</code>
+              </div>
+              <div className="mt-1">
+                <strong>Local cache:</strong>{" "}
+                {portable.local_cache
+                  ? "ON — Chromium's disk cache is written to this PC for speed (not portable; safe to delete anytime)."
+                  : "OFF — the cache travels on the drive too (slower on typical USB flash media)."}
+              </div>
+            </div>
+            <Switch
+              label="Use local cache for speed"
+              checked={s.portable_local_cache ?? true}
+              onChange={(checked) => setS({ ...s, portable_local_cache: checked })}
+            />
+            <p className="m-0 mt-2 text-paragraph-xs text-text-soft-400">
+              When on, each profile's network/code cache goes to{" "}
+              <code>%LOCALAPPDATA%\ShardXLocalCache</code> on the current PC instead of the
+              drive. That cache is disposable — deleting the folder never loses profile
+              data. Applies on the next profile launch after you press <strong>Save settings</strong>.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
+              Portable Mode keeps all your profiles, cookies, proxies and settings in a{" "}
+              <code>ShardXData</code> folder next to the app, so the whole setup can live on
+              a USB drive and move between PCs. The one-time browser engine download stays on
+              each PC. It stays off unless a <code>ShardXData</code> folder is present next to
+              the executable.
+            </p>
+            <Button
+              variant="neutral"
+              mode="stroke"
+              size="small"
+              onClick={makePortable}
+              disabled={portableBusy}
+              isLoading={portableBusy}
+            >
+              {portableBusy ? "Copying data…" : "Make this install portable"}
+            </Button>
+            {portable?.candidate_root && (
+              <p className="m-0 mt-2 text-paragraph-xs text-text-soft-400">
+                Will create: <code className="break-all">{portable.candidate_root}</code>
+              </p>
+            )}
+          </>
+        )}
+      </SettingsCard>
 
       <SettingsCard title="Proxy geo checker">
         <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
