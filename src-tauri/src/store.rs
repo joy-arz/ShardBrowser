@@ -1,4 +1,5 @@
-// Persistent storage layout under the user's config dir:
+// Persistent storage layout under the user's config dir (or, in Portable Mode,
+// under the `ShardXData` folder beside the executable — see `portable.rs`):
 //   $CONFIG/shardx-launcher/
 //     profiles/                   ← fingerprint profile JSON files
 //     proxies.json                ← saved proxy list
@@ -9,8 +10,16 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub fn config_root() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("OS config dir unavailable")?;
-    let root = base.join("shardx-launcher");
+    let root = match crate::portable::portable_root() {
+        // Portable Mode: a `ShardXData` folder beside the executable is the root
+        // for every piece of user data. Opt-in — see `portable.rs`.
+        Some(p) => p,
+        // Default (upstream) behaviour: the per-user OS config dir.
+        None => {
+            let base = dirs::config_dir().context("OS config dir unavailable")?;
+            base.join("shardx-launcher")
+        }
+    };
     std::fs::create_dir_all(&root)?;
     Ok(root)
 }

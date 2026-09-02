@@ -33,6 +33,14 @@ pub struct Settings {
     /// (see `ensure_secret`); rotating it invalidates issued tokens.
     #[serde(default)]
     pub api_secret: String,
+
+    /// Portable Mode only: when true (default), each launched profile's
+    /// Chromium disk cache is redirected to the local machine
+    /// (`%LOCALAPPDATA%\ShardXLocalCache\<id>`) instead of the USB drive —
+    /// trading portability of the (disposable) cache for far less lag on slow
+    /// flash media. No effect when Portable Mode is inactive.
+    #[serde(default = "default_portable_local_cache")]
+    pub portable_local_cache: bool,
 }
 
 fn default_theme() -> String {
@@ -51,6 +59,10 @@ fn default_api_port() -> u16 {
     40325
 }
 
+fn default_portable_local_cache() -> bool {
+    true
+}
+
 pub fn load() -> Result<Settings> {
     let path = store::settings_path()?;
     if !path.exists() {
@@ -63,6 +75,7 @@ pub fn load() -> Result<Settings> {
             api_enabled: default_api_enabled(),
             api_port: default_api_port(),
             api_secret: String::new(),
+            portable_local_cache: default_portable_local_cache(),
         });
     }
     let body = fs::read_to_string(&path)?;

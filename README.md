@@ -333,6 +333,46 @@ and you're ready to bind a proxy and launch your first profile.
 
 ---
 
+## Portable Mode (USB drive)
+
+*Windows-focused, opt-in, off by default.* Carry your entire setup — profiles,
+cookies, saved logins, proxy lists, fingerprint assignments and settings — on a
+USB drive and run it from any PC, leaving nothing behind.
+
+**Turn it on:** *Settings → Portable Mode → "Make this install portable"*. The
+launcher creates a `ShardXData` folder next to the executable and copies your
+current data into it. Quit, move **both** the app and the `ShardXData` folder to
+your drive (side by side), and relaunch from the drive. A **PORTABLE** badge
+appears in the title bar. Removing / renaming `ShardXData` reverts to a normal
+install — the presence of the folder *is* the switch.
+
+**What travels, and what stays per-PC:**
+
+| | Travels with the drive? | Why |
+|---|---|---|
+| Profiles, cookies, logins, proxies, settings, fingerprint assignments | **Yes** — in `ShardXData\` | the point of Portable Mode |
+| Downloaded browser engine (~150 MB Chromium + Widevine) | **No** — stays in `%APPDATA%\shardx-launcher\runtime\` on each PC | large and machine-specific; re-downloading on every move would be miserable. Each PC fetches it once. |
+| Browser disk cache (network / code cache) | **No, by default** — goes to `%LOCALAPPDATA%\ShardXLocalCache\` on the current PC | this is the constant small-random-write churn that USB flash is slow at; keeping it on the local disk is what removes the lag. It's disposable — losing it costs nothing. |
+
+This is the same split **Firefox Portable** makes with its local-cache option:
+the durable profile travels, the fast-moving cache stays on the machine you're
+using.
+
+**Local-cache toggle:** *Settings → Portable Mode → "Use local cache for speed"*
+(default **ON**). ON = fast, cache on the host PC, not portable (the
+`ShardXLocalCache` folder is safe to delete anytime). OFF = everything including
+cache stays in `ShardXData` on the drive — fully self-contained, but slower on
+typical USB 2.0/3.0 flash. Only Chromium's main `--disk-cache-dir` is redirected;
+the small GPU/shader cache stays on the drive (the engine exposes no separate
+documented switch for it, and it isn't the bottleneck).
+
+**Note:** using one `ShardXData` from two machines at once (shared/synced live)
+isn't supported — the profile databases will clash. Move the drive, don't fork it.
+
+Full details: [PORTABLE_MODE.md](PORTABLE_MODE.md).
+
+---
+
 ## Usage
 
 Four interchangeable ways to drive ShardX — pick whichever matches the

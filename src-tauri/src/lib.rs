@@ -5,6 +5,7 @@ mod cookies;
 mod fingerprints;
 mod launch;
 mod mcp_setup;
+mod portable;
 mod process;
 mod profile;
 mod proxy;
@@ -850,6 +851,47 @@ fn settings_save(value: settings::Settings) -> Result<(), String> {
     settings::save(&value).map_err(|e| e.to_string())
 }
 
+// ---- Portable Mode ----
+
+#[derive(serde::Serialize)]
+struct PortableStatus {
+    /// Whether the launcher is running in Portable Mode this session.
+    active: bool,
+    /// Absolute path of the portable data root (present when `active`).
+    data_root: Option<String>,
+    /// Where "Make Portable" would create `ShardXData` (when the executable
+    /// location is resolvable — used to preview the action while inactive).
+    candidate_root: Option<String>,
+    /// Effective "use local cache for speed" setting — mirrors Settings;
+    /// only meaningful when `active`.
+    local_cache: bool,
+}
+
+/// Portable Mode status for the UI (title-bar badge + Settings card).
+#[tauri::command]
+fn portable_status() -> Result<PortableStatus, String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    Ok(PortableStatus {
+        active: portable::is_portable(),
+        data_root: portable::portable_root().map(|p| p.display().to_string()),
+        candidate_root: portable::candidate_root().map(|p| p.display().to_string()),
+        local_cache: s.portable_local_cache,
+    })
+}
+
+/// Convert this install to Portable Mode: create `ShardXData` beside the
+/// executable and copy the current user-data tree into it. Runs the copy off
+/// the UI thread. Effective after the user moves the app + `ShardXData` onto
+/// the drive together and relaunches.
+#[tauri::command]
+async fn portable_enable() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(portable::enable)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|p| p.display().to_string())
+        .map_err(|e| e.to_string())
+}
+
 // ---- Automation API ----
 
 /// API connection info: base URL + permanent Bearer JWT (no raw key exposed).
@@ -1178,6 +1220,8 @@ pub fn run() {
             launch,
             settings_get,
             settings_save,
+            portable_status,
+            portable_enable,
             api_info,
             api_regenerate_token,
             ps_get_key,
@@ -1209,6 +1253,18 @@ pub fn run() {
         ])
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
+
+            if let Some(root) = portable::portable_root() {
+                eprintln!(
+                    "[launcher] Portable Mode ACTIVE — data root: {} (local cache: {})",
+                    root.display(),
+                    if settings::load().map(|s| s.portable_local_cache).unwrap_or(true) {
+                        "on, this PC"
+                    } else {
+                        "off, on drive"
+                    }
+                );
+            }
 
             {
                 use tauri::menu::{Menu, MenuItem};
