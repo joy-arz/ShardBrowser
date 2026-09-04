@@ -1,10 +1,14 @@
 # Setup & building the Windows `.exe`
 
 This is the ShardX **Launcher** — a Tauri v2 app (React + TypeScript frontend,
-Rust backend in `src-tauri/`). Building it on Windows produces two things:
+Rust backend in `src-tauri/`). Building it on Windows produces:
 
-* an **installer** — `.msi` and/or an NSIS `*-setup.exe`
-* a **portable `.exe`** — the raw compiled binary, no installer, no admin rights
+* an **installer** — `.msi` and/or an NSIS `*-setup.exe` (uses the system WebView2)
+* a **bare portable `.exe`** — the raw compiled binary; runs with no install, but
+  needs the WebView2 runtime present on the PC
+* a **self-contained portable `.zip`** — the binary **plus a bundled WebView2
+  runtime**; unzip and run anywhere (incl. a USB stick) with nothing to install.
+  CI builds this automatically (see [§ Fully self-contained build](#fully-self-contained-portable-build)).
 
 > **You can only build a Windows `.exe` on Windows.** Tauri's bundlers are
 > platform-native (`.msi` needs WiX, which is Windows-only). From macOS or Linux,
@@ -83,28 +87,63 @@ Paths assume no `--target` flag. With `--target x86_64-pc-windows-msvc`, insert
 | MSI installer | `src-tauri\target\release\bundle\msi\ShardX Launcher_2.0.0_x64_en-US.msi` |
 | NSIS setup `.exe` | `src-tauri\target\release\bundle\nsis\ShardX Launcher_2.0.0_x64-setup.exe` |
 
-The portable `.exe` is just the compiled binary one level **above** `bundle/`.
-It needs no install and no admin rights — it uses the system's Evergreen
-WebView2. Ship / copy that single file wherever you want it.
+The bare portable `.exe` is just the compiled binary one level **above**
+`bundle/`. No install, no admin — but it renders its UI with **WebView2**, so the
+target PC needs that runtime (preinstalled on Windows 11 and current Windows 10;
+otherwise the [Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/)).
 
 > The build is **unsigned** (no Authenticode cert in this repo). SmartScreen
 > shows *"Windows protected your PC"* on first run → **More info** → **Run
 > anyway**. Repeated launches don't re-prompt.
 
+### Fully self-contained portable build
+
+To ship a portable build with **zero runtime dependency** — no WebView2 install,
+runs off a USB stick on a fresh PC — bundle a fixed-version WebView2 runtime
+beside the exe:
+
+1. Download the **Fixed Version Runtime** `.cab` for x64 from Microsoft's
+   [WebView2 page](https://developer.microsoft.com/microsoft-edge/webview2/#download-section)
+   (or the version-pinned mirror the CI uses:
+   `github.com/westinyang/WebView2RuntimeArchive`).
+2. Extract it into `src-tauri\` so you get
+   `src-tauri\Microsoft.WebView2.FixedVersionRuntime.<ver>.x64\`:
+   ```powershell
+   expand Microsoft.WebView2.FixedVersionRuntime.<ver>.x64.cab -F:* src-tauri
+   ```
+3. Build the exe against it (the overlay config in `src-tauri\tauri.portable-win.conf.json`
+   sets `webviewInstallMode` to `fixedRuntime` — edit its `path` if your version differs):
+   ```powershell
+   npx tauri build --no-bundle --config src-tauri/tauri.portable-win.conf.json
+   ```
+4. Ship `ShardX Launcher.exe` **together with** the
+   `Microsoft.WebView2.FixedVersionRuntime.<ver>.x64\` folder, side by side. The
+   CI job zips exactly this pair as `ShardX-Launcher-portable-win-x64.zip`.
+
+The runtime folder adds ~180 MB. `tauri.conf.json` itself is left on the default
+`downloadBootstrapper` mode, so a normal `npm run tauri build` and the installers
+are unaffected — only this overlay build bundles the runtime.
+
 ---
 
 ## 5. Make it a portable USB build
 
-The portable `.exe` from step 4 is portable in the *"no installer"* sense. To
-also make its **data** portable — profiles, cookies, proxies, settings travelling
-on the drive — use **Portable Mode**:
+Use the **self-contained `.zip`** (from CI, or the overlay build above) so the
+target PC needs no WebView2. Unzip the whole
+`ShardX-Launcher-portable-win-x64\` folder — keeping `ShardX Launcher.exe` next
+to its `Microsoft.WebView2.FixedVersionRuntime.<ver>.x64\` folder — onto the
+drive.
 
-1. Put `ShardX Launcher.exe` in a folder on the USB drive.
+To also make its **data** portable — profiles, cookies, proxies, settings
+travelling on the drive — use **Portable Mode**:
+
+1. Put the unzipped folder on the USB drive.
 2. Either:
    * launch it once and use **Settings → Portable Mode → "Make this install
      portable"** (creates `ShardXData\` next to the exe and copies existing data
      in), **or**
-   * create an empty folder named exactly **`ShardXData`** next to the exe by hand.
+   * create an empty folder named exactly **`ShardXData`** next to
+     `ShardX Launcher.exe` by hand.
 3. Relaunch from the drive. A **PORTABLE** badge appears in the title bar.
 
 The one-time ~150 MB browser-engine download still lands on each PC you plug
@@ -122,7 +161,8 @@ local-cache toggle: **[PORTABLE_MODE.md](PORTABLE_MODE.md)**.
 | `link.exe not found` / `error: linker \`link.exe\` not found` | MSVC Build Tools missing. Install "Desktop development with C++", then open a fresh terminal. |
 | `error: Microsoft Visual C++ 14.0 or greater is required` | Same as above. |
 | Bundler step fails downloading WiX/NSIS | Network/proxy blocking the download. Retry, or run once on a machine with open egress to prime `%LOCALAPPDATA%\tauri\`. |
-| App builds but won't start on a clean Windows box | Install the [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
+| Bare `.exe` won't start on a clean Windows box — *"WebView2 … missing"* | That machine has no WebView2. Either install the [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/), or use the self-contained `.zip` (bundles its own). |
+| `expand … .cab` produced no `msedgewebview2.exe` | Wrong/incomplete `.cab`, or you pointed it at the wrong folder. Re-download the **x64 Fixed Version Runtime** cab and extract with `-F:*` into `src-tauri\`. |
 | `npm run tauri build` succeeds but there's no `bundle/` folder | `tauri.conf.json` → `bundle.active` is `true` by default; check you ran `tauri build`, not `cargo build` (the latter only makes the raw `.exe`). |
 
 ---
@@ -135,9 +175,9 @@ bundlers are OS-native. Options:
 * **GitHub Actions** — `.github/workflows/release.yml` builds Windows, macOS and
   Linux on hosted runners. Trigger it by pushing a `v*` tag, or via
   *Actions → Release → Run workflow* (manual dispatch takes a `tag` input). The
-  Windows job attaches both the `.msi` and `ShardX-Launcher-portable-win-x64.exe`
-  to the GitHub Release. *(This repo has no GitHub remote configured — you'd need
-  to push it to one first.)*
+  Windows job attaches the `.msi`, the NSIS `-setup.exe`, and the self-contained
+  `ShardX-Launcher-portable-win-x64.zip` (exe + bundled WebView2 runtime) to the
+  GitHub Release.
 * **Windows VM** — a throwaway Windows 11 VM with the prerequisites above; follow
   steps 1–4 unchanged.
 

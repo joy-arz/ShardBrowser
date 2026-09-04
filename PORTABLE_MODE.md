@@ -27,12 +27,18 @@ portable setup or it doesn't, with no hidden state.
 
 ## Turning it on
 
+Use the **`ShardX-Launcher-portable-win-x64.zip`** release download — it's
+self-contained (it bundles its own WebView2 runtime, so it runs on a PC with
+nothing installed). Unzip it and keep the folder intact:
+`ShardX Launcher.exe` must stay next to its
+`Microsoft.WebView2.FixedVersionRuntime.*` folder.
+
 1. Open **Settings → Portable Mode → "Make this install portable"**.
 2. The launcher creates `ShardXData` next to the app and copies your current
    profiles, cookies, proxies and settings into it.
 3. Quit the app.
-4. Move **both** the app **and** the `ShardXData` folder onto your USB drive,
-   keeping them side by side.
+4. Move the **whole folder** (the exe, the WebView2 runtime folder, **and**
+   `ShardXData`) onto your USB drive, keeping everything side by side.
 5. Launch the app from the drive. The title bar now shows a **PORTABLE** badge.
 
 To go back to a normal install, quit and either move the app off the drive

@@ -342,10 +342,15 @@ and you're ready to bind a proxy and launch your first profile.
 cookies, saved logins, proxy lists, fingerprint assignments and settings — on a
 USB drive and run it from any PC, leaving nothing behind.
 
+**Get the right download:** use `ShardX-Launcher-portable-win-x64.zip` from the
+[releases](../../releases) — it bundles its own WebView2 runtime, so it runs on a
+bare PC with nothing to install. Unzip it and keep the folder intact (the exe
+next to its `Microsoft.WebView2.FixedVersionRuntime.*` folder).
+
 **Turn it on:** *Settings → Portable Mode → "Make this install portable"*. The
 launcher creates a `ShardXData` folder next to the executable and copies your
-current data into it. Quit, move **both** the app and the `ShardXData` folder to
-your drive (side by side), and relaunch from the drive. A **PORTABLE** badge
+current data into it. Quit, move the **whole folder** (exe + WebView2 runtime +
+`ShardXData`) to your drive, and relaunch from the drive. A **PORTABLE** badge
 appears in the title bar. Removing / renaming `ShardXData` reverts to a normal
 install — the presence of the folder *is* the switch.
 

@@ -5,3 +5,6 @@ dist/
 ui-kit/dist/
 ui-kit/node_modules/
 /src-tauri/target
+
+# Fixed WebView2 runtime — ~180 MB, fetched by CI (see release.yml), never committed
+/src-tauri/Microsoft.WebView2.FixedVersionRuntime.*/
