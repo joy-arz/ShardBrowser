@@ -11,7 +11,7 @@ import { Badge } from "../../shared/ui";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo } from "../../entities/settings";
 import { settingsGet, settingsSave, apiInfo, apiRegenerateToken, mcpDownload } from "../../entities/settings";
-import { portableStatus, portableEnable, type PortableStatus } from "../../entities/portable";
+import { portableStatus, portableEnable, portableClearLocalCache, type PortableStatus } from "../../entities/portable";
 
 function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -66,6 +66,20 @@ export function SettingsPage() {
       setPortableBusy(false);
     }
   };
+
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const clearLocalCache = async () => {
+    setCacheBusy(true);
+    try {
+      const removed = await portableClearLocalCache();
+      toast.ok(removed ? `Cleared ${removed}` : "Local cache was already empty");
+    } catch (e) {
+      toast.err("Couldn't clear local cache: " + String(e));
+    } finally {
+      setCacheBusy(false);
+    }
+  };
+
   const regenToken = async () => {
     try { setApi(await apiRegenerateToken()); toast.ok("Token regenerated"); }
     catch (e) { toast.err(String(e)); }
@@ -126,6 +140,21 @@ export function SettingsPage() {
               drive. That cache is disposable — deleting the folder never loses profile
               data. Applies on the next profile launch after you press <strong>Save settings</strong>.
             </p>
+            <div className="mt-2.5 flex items-center gap-2.5">
+              <Button
+                variant="neutral"
+                mode="stroke"
+                size="small"
+                onClick={clearLocalCache}
+                disabled={cacheBusy}
+                isLoading={cacheBusy}
+              >
+                {cacheBusy ? "Clearing…" : "Clear local cache (this PC)"}
+              </Button>
+              <span className="text-paragraph-xs text-text-soft-400">
+                Frees the disk cache for every profile on this machine. Safe — it rebuilds on next launch.
+              </span>
+            </div>
           </>
         ) : (
           <>

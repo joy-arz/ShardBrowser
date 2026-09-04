@@ -18,3 +18,8 @@ export const portableStatus = () => invoke<PortableStatus>("portable_status");
 /// Create `ShardXData` next to the executable and copy the current user data
 /// into it. Returns the new folder's absolute path.
 export const portableEnable = () => invoke<string>("portable_enable");
+
+/// Delete this PC's local scratch-cache tree. Returns the removed path, or
+/// null if there was nothing to remove.
+export const portableClearLocalCache = () =>
+  invoke<string | null>("portable_clear_local_cache");

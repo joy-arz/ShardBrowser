@@ -892,6 +892,18 @@ async fn portable_enable() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Delete this PC's Portable Mode local scratch-cache tree. Returns the removed
+/// path, or null if there was nothing to remove. Disposable — rebuilt on the
+/// next profile launch.
+#[tauri::command]
+async fn portable_clear_local_cache() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(portable::clear_local_cache)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|o| o.map(|p| p.display().to_string()))
+        .map_err(|e| e.to_string())
+}
+
 // ---- Automation API ----
 
 /// API connection info: base URL + permanent Bearer JWT (no raw key exposed).
@@ -1222,6 +1234,7 @@ pub fn run() {
             settings_save,
             portable_status,
             portable_enable,
+            portable_clear_local_cache,
             api_info,
             api_regenerate_token,
             ps_get_key,

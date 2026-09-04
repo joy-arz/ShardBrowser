@@ -61,16 +61,42 @@ pub fn is_portable() -> bool {
     PORTABLE_ROOT.get_or_init(detect).is_some()
 }
 
+/// Root of this machine's per-profile scratch caches:
+/// `%LOCALAPPDATA%\ShardXLocalCache\` on Windows.
+pub fn local_cache_root() -> Option<PathBuf> {
+    Some(dirs::cache_dir()?.join(LOCAL_CACHE_DIR_NAME))
+}
+
 /// Per-profile scratch cache directory on the LOCAL machine, used in Portable
 /// Mode to keep Chromium's high-churn disk cache off the (slow) USB drive:
 /// `%LOCALAPPDATA%\ShardXLocalCache\<profile-id>` on Windows. Safe to delete at
 /// any time — it holds only disposable cache, never profile data.
 pub fn local_cache_dir(profile_id: &str) -> Option<PathBuf> {
-    Some(
-        dirs::cache_dir()?
-            .join(LOCAL_CACHE_DIR_NAME)
-            .join(profile_id),
-    )
+    Some(local_cache_root()?.join(profile_id))
+}
+
+/// Delete this machine's entire local scratch-cache tree. Safe at any time —
+/// it is disposable cache, rebuilt on the next launch. Returns the removed
+/// path, or `None` if there was nothing to remove.
+pub fn clear_local_cache() -> Result<Option<PathBuf>> {
+    let root = local_cache_root().context("cannot resolve the local cache location")?;
+    if root.exists() {
+        std::fs::remove_dir_all(&root).with_context(|| format!("remove {}", root.display()))?;
+        eprintln!("[portable] cleared local cache: {}", root.display());
+        Ok(Some(root))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Remove one profile's local scratch cache (called when a profile is deleted).
+/// No-op if absent. Best-effort — never fails the caller.
+pub fn remove_local_cache_for(profile_id: &str) {
+    if let Some(dir) = local_cache_dir(profile_id) {
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 /// Convert the current install to Portable Mode: create `ShardXData` next to the
@@ -93,15 +119,35 @@ pub fn enable() -> Result<PathBuf> {
     copy_tree(&src, &dest)
         .with_context(|| format!("copy {} into {}", src.display(), dest.display()))?;
     eprintln!(
-        "[portable] created {} and copied existing data from {}",
+        "[portable] created {} and copied existing data from {} (cache dirs skipped)",
         dest.display(),
         src.display()
     );
     Ok(dest)
 }
 
-/// Plain recursive directory copy (files + subdirs). Existing files at the
-/// destination are overwritten.
+/// Chromium cache subdirectories: disposable, high-churn, often gigabytes, and
+/// pointless to carry on the drive — Chromium rebuilds them on demand. Matched
+/// by exact directory name anywhere in the tree; skipped when copying an
+/// existing profile into `ShardXData`.
+const SKIP_DIR_NAMES: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "GraphiteDawnCache",
+    "Media Cache",
+    "Application Cache",
+    "CacheStorage",
+    "ScriptCache",
+];
+
+/// Recursive directory copy (files + subdirs), skipping `SKIP_DIR_NAMES`.
+/// Existing files at the destination are overwritten.
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -109,6 +155,12 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
+            if SKIP_DIR_NAMES
+                .iter()
+                .any(|s| entry.file_name() == std::ffi::OsStr::new(s))
+            {
+                continue;
+            }
             copy_tree(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;

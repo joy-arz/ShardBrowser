@@ -279,6 +279,8 @@ pub fn delete(id: &str) -> Result<()> {
     if udd.exists() {
         let _ = fs::remove_dir_all(udd);
     }
+    // And any Portable Mode local scratch cache this profile left on this PC.
+    crate::portable::remove_local_cache_for(id);
     Ok(())
 }
 

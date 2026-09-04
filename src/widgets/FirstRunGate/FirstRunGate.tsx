@@ -9,11 +9,20 @@ export function FirstRunGate({ children }: { children: ReactNode }) {
   const [installed, setInstalled] = useState<boolean | null>(null);
   const [prog, setProg] = useState<RtProgress | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Portable Mode: the engine still installs per-PC, so explain the download.
+  const [portable, setPortable] = useState(false);
   // Single in-flight install at a time.
   const installing = useRef(false);
 
   const fmt = (b: number) =>
     b < 1024 * 1024 ? `${(b / 1024).toFixed(0)} KB` : `${(b / (1024 * 1024)).toFixed(1)} MB`;
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    invoke<{ active: boolean }>("portable_status")
+      .then((p) => setPortable(p.active))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +102,14 @@ export function FirstRunGate({ children }: { children: ReactNode }) {
           First-run download from our CDN. Done once per install
           (~{prog?.total ? fmt(prog.total) : "150 MB"}).
         </div>
+
+        {portable && (
+          <Alert status="warning" variant="light" className="mb-4 text-left">
+            <strong>Portable Mode:</strong> the browser engine installs on{" "}
+            <strong>this PC</strong> (not the USB drive) — once per machine. Your
+            profiles and logins are already on the drive.
+          </Alert>
+        )}
 
         {prog && (
           <>
