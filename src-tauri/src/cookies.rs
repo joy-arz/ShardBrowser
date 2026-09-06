@@ -352,6 +352,55 @@ mod win {
         // Re-wrap for whatever machine we're on now.
         write_key(&ls_path, &raw_key)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn tmp() -> std::path::PathBuf {
+            let mut p = std::env::temp_dir();
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            p.push(format!("shardx-win-cookie-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        }
+
+        #[test]
+        fn portable_key_roundtrips_through_dpapi() {
+            let udd = tmp();
+            ensure_portable_key(&udd).unwrap();
+
+            let ps = udd.join(PORTABLE_STATE_FILE);
+            let ls = udd.join("Local State");
+            assert!(ps.exists() && ls.exists());
+
+            // Local State's DPAPI-wrapped key must unwrap to the raw key we stored.
+            let raw_from_ls = read_key(&ls).unwrap().expect("Local State has a key");
+            let raw_from_ps = read_portable_key(&ps).unwrap().expect("Portable State has a key");
+            assert_eq!(raw_from_ls.len(), 32);
+            assert_eq!(raw_from_ls, raw_from_ps);
+
+            // Idempotent: a second call keeps the same raw key.
+            ensure_portable_key(&udd).unwrap();
+            assert_eq!(read_key(&ls).unwrap().unwrap(), raw_from_ps);
+
+            let _ = std::fs::remove_dir_all(&udd);
+        }
+
+        #[test]
+        fn dpapi_and_gcm_roundtrip() {
+            let plain = b"the-quick-brown-fox";
+            let wrapped = unsafe { dpapi(plain, true).unwrap() };
+            assert_eq!(unsafe { dpapi(&wrapped, false).unwrap() }, plain);
+
+            let key = rand_bytes::<32>();
+            let ct = gcm_encrypt(&key, plain);
+            assert_eq!(gcm_decrypt(&key, &ct).unwrap(), plain);
+        }
+    }
 }
 
 /// Portable Mode: make this profile's cookie/password encryption survive the
@@ -520,4 +569,45 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<()> {
             host_key, top_frame_site_key, has_cross_site_ancestor, name, path, source_scheme, source_port);",
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_udd() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("shardx-cookie-crypt-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// The OSCrypt cipher round-trips a cookie value on every platform:
+    /// fixed-key AES-128-CBC on macOS/Linux, DPAPI-keyed AES-256-GCM on Windows.
+    #[test]
+    fn oscrypt_cipher_roundtrip() {
+        let udd = tmp_udd();
+        let crypt = Crypt::open(&udd).expect("open Crypt");
+        let blob = crypt.encrypt("accounts.example.com", "session=abc123; keep-me");
+        assert_eq!(&blob[..3], b"v10");
+        assert_eq!(
+            crypt.decrypt(&blob, ""),
+            "session=abc123; keep-me",
+            "decrypt must recover the original value"
+        );
+        let _ = std::fs::remove_dir_all(&udd);
+    }
+
+    /// Legacy rows (no v10 prefix) pass the plaintext column through untouched.
+    #[test]
+    fn legacy_plaintext_passthrough() {
+        let udd = tmp_udd();
+        let crypt = Crypt::open(&udd).unwrap();
+        assert_eq!(crypt.decrypt(b"", "legacy-value"), "legacy-value");
+        let _ = std::fs::remove_dir_all(&udd);
+    }
 }

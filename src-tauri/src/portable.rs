@@ -46,7 +46,12 @@ pub fn candidate_root() -> Option<PathBuf> {
 }
 
 fn detect() -> Option<PathBuf> {
-    let root = candidate_root()?;
+    detect_beside(&exe_dir()?)
+}
+
+/// Portable root next to `dir`, if a `ShardXData` folder is there.
+fn detect_beside(dir: &Path) -> Option<PathBuf> {
+    let root = dir.join(PORTABLE_DIR_NAME);
     root.is_dir().then_some(root)
 }
 
@@ -212,4 +217,110 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("shardx-portable-test-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn detect_requires_the_folder() {
+        let dir = tmp("detect");
+        assert_eq!(detect_beside(&dir), None);
+        std::fs::create_dir_all(dir.join(PORTABLE_DIR_NAME)).unwrap();
+        assert_eq!(detect_beside(&dir), Some(dir.join(PORTABLE_DIR_NAME)));
+        // A file of the same name does not count.
+        let dir2 = tmp("detect2");
+        std::fs::write(dir2.join(PORTABLE_DIR_NAME), b"x").unwrap();
+        assert_eq!(detect_beside(&dir2), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn copy_tree_skips_cache_dirs_only() {
+        let src = tmp("copy-src");
+        let dst = tmp("copy-dst");
+        std::fs::remove_dir_all(&dst).unwrap();
+
+        std::fs::create_dir_all(src.join("Default/Local Storage")).unwrap();
+        std::fs::write(src.join("Default/Local Storage/keep.ldb"), b"data").unwrap();
+        std::fs::write(src.join("Default/Cookies"), b"db").unwrap();
+        std::fs::create_dir_all(src.join("Default/Cache/f")).unwrap();
+        std::fs::write(src.join("Default/Cache/f/blob"), b"junk").unwrap();
+        std::fs::create_dir_all(src.join("Default/GPUCache")).unwrap();
+        std::fs::write(src.join("Default/GPUCache/x"), b"junk").unwrap();
+        std::fs::create_dir_all(src.join("Default/Service Worker/CacheStorage")).unwrap();
+        std::fs::write(src.join("Default/Service Worker/CacheStorage/x"), b"junk").unwrap();
+
+        copy_tree(&src, &dst).unwrap();
+
+        assert!(dst.join("Default/Local Storage/keep.ldb").exists());
+        assert!(dst.join("Default/Cookies").exists());
+        assert!(!dst.join("Default/Cache").exists(), "Cache must be skipped");
+        assert!(!dst.join("Default/GPUCache").exists(), "GPUCache must be skipped");
+        assert!(
+            !dst.join("Default/Service Worker/CacheStorage").exists(),
+            "CacheStorage must be skipped"
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn harden_session_restore_patches_and_preserves() {
+        let udd = tmp("prefs");
+        std::fs::create_dir_all(udd.join("Default")).unwrap();
+        std::fs::write(
+            udd.join("Default/Preferences"),
+            r#"{"profile":{"name":"keep me","exit_type":"Crashed"},"other":{"a":1}}"#,
+        )
+        .unwrap();
+
+        harden_session_restore(&udd);
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(udd.join("Default/Preferences")).unwrap())
+                .unwrap();
+        assert_eq!(v["profile"]["exit_type"], "Normal");
+        assert_eq!(v["profile"]["exited_cleanly"], true);
+        assert_eq!(v["session"]["restore_on_startup"], 1);
+        assert_eq!(v["profile"]["name"], "keep me", "unrelated keys preserved");
+        assert_eq!(v["other"]["a"], 1);
+
+        let _ = std::fs::remove_dir_all(&udd);
+    }
+
+    #[test]
+    fn harden_session_restore_tolerates_missing_and_garbage() {
+        let udd = tmp("prefs-bad");
+        // No Preferences file at all.
+        harden_session_restore(&udd);
+        // Garbage Preferences — must not panic, must not write nonsense.
+        std::fs::create_dir_all(udd.join("Default")).unwrap();
+        std::fs::write(udd.join("Default/Preferences"), b"not json{{").unwrap();
+        harden_session_restore(&udd);
+        let _ = std::fs::remove_dir_all(&udd);
+    }
+
+    #[test]
+    fn local_cache_paths_are_nested_under_the_root() {
+        if let (Some(root), Some(one)) = (local_cache_root(), local_cache_dir("abc123")) {
+            assert!(one.starts_with(&root));
+            assert!(one.ends_with("abc123"));
+            assert!(root.ends_with(LOCAL_CACHE_DIR_NAME));
+        }
+    }
 }
