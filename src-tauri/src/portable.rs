@@ -99,6 +99,51 @@ pub fn remove_local_cache_for(profile_id: &str) {
     }
 }
 
+/// Per-launch prep for a profile's user-data-dir when running in Portable Mode.
+/// Best-effort — logs and moves on, never blocks the launch.
+///
+///   * keeps the cookie / saved-password encryption key portable across
+///     machines (Windows seals it to one PC by default — see `cookies.rs`);
+///   * patches Preferences so Chromium restores the last session and skips the
+///     "didn't shut down correctly" prompt even after an unclean eject.
+pub fn prepare_profile(udd: &Path) {
+    if let Err(e) = crate::cookies::ensure_portable_oscrypt_key(udd) {
+        eprintln!("[portable] portable cookie key for {}: {e}", udd.display());
+    }
+    harden_session_restore(udd);
+}
+
+fn harden_session_restore(udd: &Path) {
+    let pref_path = udd.join("Default").join("Preferences");
+    let Ok(text) = std::fs::read_to_string(&pref_path) else {
+        return; // no Preferences yet (first launch) — nothing to restore anyway
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(obj) = v.as_object_mut() else { return };
+
+    if let Some(p) = obj
+        .entry("profile")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    {
+        p.insert("exit_type".into(), serde_json::json!("Normal"));
+        p.insert("exited_cleanly".into(), serde_json::json!(true));
+    }
+    if let Some(s) = obj
+        .entry("session")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    {
+        // 1 = "restore the last session".
+        s.insert("restore_on_startup".into(), serde_json::json!(1));
+    }
+    if let Ok(out) = serde_json::to_string(&v) {
+        let _ = std::fs::write(&pref_path, out);
+    }
+}
+
 /// Convert the current install to Portable Mode: create `ShardXData` next to the
 /// executable and copy the existing user-data tree into it. The change takes
 /// effect once the user moves the app **and** the `ShardXData` folder onto the

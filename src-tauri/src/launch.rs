@@ -99,24 +99,29 @@ pub async fn launch_profile(
     cmd.arg(format!("--user-data-dir={}", udd.display()));
     cmd.arg("--no-first-run");
 
-    // Portable Mode anti-lag: keep Chromium's high-churn disk cache (network /
-    // code cache) on the fast local disk instead of the USB drive. The durable
-    // profile still lives under --user-data-dir on the drive; only the
-    // disposable cache is split off. Controlled by Settings → "Use local cache
-    // for speed" (default on); when off, the cache stays under --user-data-dir
-    // so the drive is fully self-contained. No-op when Portable Mode is off.
-    if crate::portable::is_portable() && settings::load()?.portable_local_cache {
-        if let Some(cache_dir) = crate::portable::local_cache_dir(profile_id) {
-            match std::fs::create_dir_all(&cache_dir) {
-                Ok(()) => {
-                    cmd.arg(format!("--disk-cache-dir={}", cache_dir.display()));
-                    eprintln!("[launcher] portable: --disk-cache-dir={}", cache_dir.display());
+    if crate::portable::is_portable() {
+        // Keep logins + tab restore working when the drive moves between PCs.
+        crate::portable::prepare_profile(&udd);
+
+        // Anti-lag: keep Chromium's high-churn disk cache (network / code cache)
+        // on the fast local disk instead of the USB drive. The durable profile
+        // still lives under --user-data-dir on the drive; only the disposable
+        // cache is split off. Controlled by Settings → "Use local cache for
+        // speed" (default on); when off, the cache stays under --user-data-dir
+        // so the drive is fully self-contained.
+        if settings::load()?.portable_local_cache {
+            if let Some(cache_dir) = crate::portable::local_cache_dir(profile_id) {
+                match std::fs::create_dir_all(&cache_dir) {
+                    Ok(()) => {
+                        cmd.arg(format!("--disk-cache-dir={}", cache_dir.display()));
+                        eprintln!("[launcher] portable: --disk-cache-dir={}", cache_dir.display());
+                    }
+                    Err(e) => eprintln!(
+                        "[launcher] portable: local cache dir {} unavailable ({e}); \
+                         leaving cache on the drive",
+                        cache_dir.display()
+                    ),
                 }
-                Err(e) => eprintln!(
-                    "[launcher] portable: local cache dir {} unavailable ({e}); \
-                     leaving cache on the drive",
-                    cache_dir.display()
-                ),
             }
         }
     }

@@ -294,6 +294,77 @@ mod win {
         std::fs::write(ls_path, serde_json::to_string(&json)?)?;
         Ok(())
     }
+
+    // ---- Portable Mode: machine-independent OSCrypt key ----
+    //
+    // Windows normally seals the cookie/password key with DPAPI, which is bound
+    // to one PC + user — so a profile carried on a USB drive loses every login
+    // on the next machine. Keep the raw 32-byte key in `<udd>/Portable State`
+    // (which travels with the drive) and re-seal `Local State` for whatever
+    // machine we're on, every launch.
+    //
+    // Security note: the raw key sits unencrypted on the drive, so anyone who
+    // gets the drive can read that profile's cookies. That is the accepted
+    // trade-off for a portable profile.
+    const PORTABLE_STATE_FILE: &str = "Portable State";
+
+    fn read_portable_key(p: &Path) -> Result<Option<Vec<u8>>> {
+        if !p.exists() {
+            return Ok(None);
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(p).context("read Portable State")?)
+                .context("parse Portable State")?;
+        let Some(b64) = v.get("oscrypt_key_b64").and_then(|s| s.as_str()) else {
+            return Ok(None);
+        };
+        let key = STANDARD.decode(b64).context("decode portable key")?;
+        Ok((key.len() == 32).then_some(key))
+    }
+
+    fn write_portable_key(p: &Path, key: &[u8]) -> Result<()> {
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).ok();
+        }
+        let j = serde_json::json!({ "oscrypt_key_b64": STANDARD.encode(key) });
+        std::fs::write(p, serde_json::to_string(&j)?).context("write Portable State")?;
+        Ok(())
+    }
+
+    /// Ensure this profile's OSCrypt key is portable and that `Local State` is
+    /// sealed for the current machine. Call once before each launch.
+    pub fn ensure_portable_key(udd: &Path) -> Result<()> {
+        let portable_path = udd.join(PORTABLE_STATE_FILE);
+        let ls_path = udd.join("Local State");
+
+        let raw_key = match read_portable_key(&portable_path)? {
+            Some(k) => k,
+            None => {
+                // First time: recover the real key from an existing (this-machine)
+                // `Local State` if we can; otherwise mint a fresh one. Cookies
+                // encrypted under a key we can't recover stay lost — unavoidable.
+                let recovered = read_key(&ls_path).ok().flatten();
+                let k = recovered.unwrap_or_else(|| rand_bytes::<32>().to_vec());
+                write_portable_key(&portable_path, &k)?;
+                k
+            }
+        };
+        // Re-wrap for whatever machine we're on now.
+        write_key(&ls_path, &raw_key)
+    }
+}
+
+/// Portable Mode: make this profile's cookie/password encryption survive the
+/// drive moving between machines. No-op on macOS/Linux (their ShardX builds
+/// already use a fixed portable key); on Windows it keeps the raw key in
+/// `<udd>/Portable State` and re-seals `Local State` for the current PC.
+#[cfg(target_os = "windows")]
+pub fn ensure_portable_oscrypt_key(udd: &Path) -> Result<()> {
+    win::ensure_portable_key(udd)
+}
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_portable_oscrypt_key(_udd: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn samesite_to_str(v: i64) -> &'static str {
