@@ -45,6 +45,29 @@ export function FirstRunGate({ children }: { children: ReactNode }) {
         if (!cancelled) { setProg(null); setInstalled(true); }
       });
 
+      // Fast path: a local-only check (no network) so the window can paint
+      // immediately when the engine is already here. The update check then
+      // runs in the background and installs any engine bump silently.
+      try {
+        const local = await invoke<RtStatus>("runtime_status_local");
+        if (!cancelled && local.spec && local.installed && local.fingerprints_installed) {
+          setInstalled(true);
+          invoke<RtStatus>("runtime_status")
+            .then((full) => {
+              if (!cancelled && full.update_available && !installing.current) {
+                installing.current = true;
+                invoke("runtime_install", { force: false })
+                  .catch(() => {})
+                  .finally(() => { installing.current = false; });
+              }
+            })
+            .catch(() => {});
+          return;
+        }
+      } catch {
+        // fall through to the full (network) path below
+      }
+
       let status: RtStatus;
       try {
         status = await invoke<RtStatus>("runtime_status");

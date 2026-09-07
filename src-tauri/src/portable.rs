@@ -104,6 +104,67 @@ pub fn remove_local_cache_for(profile_id: &str) {
     }
 }
 
+/// Force the OS to commit every buffered write for the drive the portable data
+/// lives on — the software half of "Safely Remove Hardware". Call after all
+/// browser processes have exited, before telling the user it's safe to unplug.
+///
+/// Windows: `FlushFileBuffers` on a `\\.\X:` volume handle. No-op elsewhere
+/// (dev only) and on non-drive-letter roots (e.g. a UNC path), where the caller
+/// should fall back to the OS eject UI.
+#[cfg(target_os = "windows")]
+pub fn flush_drive() -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+
+    let root = portable_root().context("not running in Portable Mode")?;
+    let prefix = root
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let letter = prefix.chars().next().filter(|c| c.is_ascii_alphabetic());
+    let Some(letter) = letter else {
+        bail!("portable root {prefix:?} has no drive letter — use the tray's Safely Remove instead");
+    };
+
+    let vol = format!(r"\\.\{}:", letter.to_ascii_uppercase());
+    let wide: Vec<u16> = std::ffi::OsStr::new(&vol)
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    // SAFETY: standard Win32 open / flush / close on a volume handle we own.
+    unsafe {
+        let h = CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if h == INVALID_HANDLE_VALUE {
+            bail!("open {vol}: {}", std::io::Error::last_os_error());
+        }
+        let ok = FlushFileBuffers(h);
+        CloseHandle(h);
+        if ok == 0 {
+            bail!("FlushFileBuffers({vol}): {}", std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn flush_drive() -> Result<()> {
+    Ok(())
+}
+
 /// Per-launch prep for a profile's user-data-dir when running in Portable Mode.
 /// Best-effort — logs and moves on, never blocks the launch.
 ///

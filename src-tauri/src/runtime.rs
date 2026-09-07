@@ -252,7 +252,14 @@ struct RemoteManifest {
 /// R2/S3 per-archive. Empty/None when unreachable.
 async fn fetch_manifest() -> RemoteManifest {
     async fn inner() -> Option<RemoteManifest> {
-        let resp = reqwest::Client::new().get(MANIFEST_URL).send().await.ok()?;
+        // Hard cap so a slow/blocked network can never stall a status check
+        // (and, through it, the first paint of the app window).
+        let resp = reqwest::Client::new()
+            .get(MANIFEST_URL)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -431,6 +438,37 @@ pub async fn ensure_profiles_migrated() {
     local.applied_chromium_version = Some(target);
     local.applied_signature = Some(sig);
     let _ = save_manifest(&local);
+}
+
+/// Local-only status — never touches the network. Used to reveal the app
+/// window fast; `remote_browser_etag` / `update_available` are left blank and
+/// the caller does a full `runtime_status()` in the background afterwards.
+#[tauri::command]
+pub fn runtime_status_local() -> Result<RuntimeStatus, String> {
+    let spec = host_spec();
+    let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
+    let m = load_manifest();
+    let fingerprints_installed = m.fingerprints_etag.is_some()
+        && crate::store::fingerprints_dir()
+            .map(|d| {
+                fs::read_dir(&d)
+                    .map(|it| {
+                        it.flatten().any(|e| {
+                            e.path().extension().and_then(|s| s.to_str()) == Some("json")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+    Ok(RuntimeStatus {
+        installed,
+        binary_path: if installed { binary_path().ok() } else { None },
+        installed_browser_etag: m.browser_etag,
+        remote_browser_etag: None,
+        update_available: false,
+        spec,
+        fingerprints_installed,
+    })
 }
 
 #[tauri::command]

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { HOST_OS } from "../../shared/lib/utils";
 import { portableStatus } from "../../entities/portable";
+import { useSafeClose } from "../SafeClose/SafeClose";
 
 export function TitleBar() {
   // Portable Mode indicator — always visible while the app runs in it, so the
@@ -35,6 +36,18 @@ export function TitleBar() {
           <span className="text-[10px] text-text-soft-400">
             cache: {portable.localCache ? "this PC" : "on drive"}
           </span>
+          <button
+            type="button"
+            onClick={() => useSafeClose.getState().show()}
+            title="Close all browsers and flush data to the USB drive before removing it"
+            className="pointer-events-auto ml-1 flex items-center gap-1 rounded-[4px] px-1.5 py-px text-[10px] font-medium text-text-sub-600 hover:bg-bg-weak-50 hover:text-text-strong-950"
+          >
+            <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M5 1 1 5.5h8z" fill="currentColor" />
+              <rect x="1" y="7" width="8" height="1.6" fill="currentColor" />
+            </svg>
+            Safe close
+          </button>
         </span>
       )}
       {/* Custom min/max/close on Win/Linux (macOS uses native traffic lights). */}
@@ -61,7 +74,11 @@ export function TitleBar() {
           <button
             className="flex h-full w-[46px] cursor-default items-center justify-center border-none bg-transparent p-0 text-icon-soft-400 hover:bg-error-base! hover:text-white!"
             aria-label="Close"
-            onClick={() => getCurrentWindow().close()}
+            onClick={() =>
+              portable.active
+                ? useSafeClose.getState().show()
+                : getCurrentWindow().close()
+            }
           >
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
               <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" strokeWidth="1" />

@@ -23,3 +23,18 @@ export const portableEnable = () => invoke<string>("portable_enable");
 /// null if there was nothing to remove.
 export const portableClearLocalCache = () =>
   invoke<string | null>("portable_clear_local_cache");
+
+/// Progress event for the Safe-close flow (`portable:safeclose`).
+export type SafeCloseEvent = {
+  phase: "closing" | "flushing" | "done";
+  done: number;
+  total: number;
+  flushed: boolean | null;
+};
+
+/// Close every running browser, then flush the portable drive. Resolves when
+/// done; listen to `portable:safeclose` for progress.
+export const portableSafeClose = () => invoke<void>("portable_safe_close");
+
+/// Quit the launcher (bypasses minimize-to-tray).
+export const appQuit = () => invoke<void>("app_quit");

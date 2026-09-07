@@ -4,6 +4,7 @@ import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
 import { StarModal } from "../widgets/StarModal/StarModal";
+import { SafeCloseModal } from "../widgets/SafeClose/SafeClose";
 import { BrowsersPage } from "../pages/browsers";
 import { ProxiesPage } from "../pages/proxies";
 import { ProxyShardPage } from "../pages/proxyshard";
@@ -17,6 +18,7 @@ export function App() {
   return (
     <>
       <TitleBar />
+      <SafeCloseModal />
       <FirstRunGate>
         <div
           className="grid overflow-hidden bg-bg-weak-50 [grid-template-columns:240px_1fr] [@media(min-width:1700px)]:[grid-template-columns:280px_1fr]"

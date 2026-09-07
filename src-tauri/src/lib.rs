@@ -904,6 +904,63 @@ async fn portable_clear_local_cache() -> Result<Option<String>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// "Safe close": gracefully close every running ShardX browser, then force the
+/// OS to flush all buffered writes to the portable drive, so it's safe to
+/// unplug. Emits `portable:safeclose` progress events; the frontend calls
+/// `app_quit` once it resolves.
+#[tauri::command]
+async fn portable_safe_close(window: tauri::Window) -> Result<(), String> {
+    use tauri::Emitter;
+
+    let running: Vec<String> = process::Tracker::shared()
+        .running()
+        .into_iter()
+        .map(|r| r.profile_id)
+        .collect();
+    let total = running.len();
+    let emit = |phase: &str, done: usize, flushed: Option<bool>| {
+        let _ = window.emit(
+            "portable:safeclose",
+            serde_json::json!({ "phase": phase, "done": done, "total": total, "flushed": flushed }),
+        );
+    };
+
+    emit("closing", 0, None);
+    for (i, id) in running.iter().enumerate() {
+        let _ = process::Tracker::shared().kill(id).await;
+        // Wait up to ~12s for the process to actually exit and finalise its DBs.
+        for _ in 0..120 {
+            if !is_profile_running(id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        emit("closing", i + 1, None);
+    }
+
+    emit("flushing", total, None);
+    let flushed = match tokio::task::spawn_blocking(portable::flush_drive).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            eprintln!("[portable] safe-close flush: {e}");
+            false
+        }
+        Err(e) => {
+            eprintln!("[portable] safe-close flush task: {e}");
+            false
+        }
+    };
+    emit("done", total, Some(flushed));
+    Ok(())
+}
+
+/// Quit the launcher outright (bypasses minimize-to-tray). Used by the
+/// Safe-close dialog's Quit button.
+#[tauri::command]
+fn app_quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 // ---- Automation API ----
 
 /// API connection info: base URL + permanent Bearer JWT (no raw key exposed).
@@ -1235,6 +1292,8 @@ pub fn run() {
             portable_status,
             portable_enable,
             portable_clear_local_cache,
+            portable_safe_close,
+            app_quit,
             api_info,
             api_regenerate_token,
             ps_get_key,
@@ -1261,6 +1320,7 @@ pub fn run() {
             cookies_import,
             mcp_download,
             runtime::runtime_status,
+            runtime::runtime_status_local,
             runtime::runtime_install,
             runtime::launcher_update_check,
         ])
