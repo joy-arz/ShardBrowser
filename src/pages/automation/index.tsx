@@ -16,6 +16,8 @@ import { ProjectEditor } from "./ProjectEditor";
 import { ModulesCard } from "../../features/automation-modules";
 import { useT } from "../../shared/i18n";
 
+import { SequentialCard } from "./SequentialCard";
+
 export function AutomationPage() {
   const t = useT();
   const init = useAutomation((s) => s.init);
@@ -72,6 +74,8 @@ export function AutomationPage() {
           </p>
         </div>
       </div>
+
+      <SequentialCard />
 
       <div className="mb-3.5 flex items-center gap-2">
         <input

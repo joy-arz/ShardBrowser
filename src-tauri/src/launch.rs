@@ -59,6 +59,8 @@ pub async fn launch_profile_synced(
     bus_port: u16,
     bus_token: &str,
 ) -> Result<LaunchOutcome> {
+    let _gate = crate::sequential::launch_gate().lock().await;
+    if !crate::sequential::launch_allowed() { anyhow::bail!("sequential automation owns the launcher; stop the batch first"); }
     // One browser per profile: two children sharing a user-data dir corrupt each other's
     // state, and the second displaces the first in the tracker, leaving it unstoppable.
     if Tracker::shared().is_running(profile_id) {

@@ -10,6 +10,7 @@ mod gpu_caps;
 mod launch;
 mod mcp_setup;
 mod portable;
+mod sequential;
 mod migrate;
 mod process;
 mod profile;
@@ -1038,6 +1039,8 @@ fn data_root_get() -> Result<DataRootInfo, String> {
 /// Progress goes out as `data-migration` events; nothing launches until done.
 #[tauri::command]
 async fn data_root_migrate(app: tauri::AppHandle, path: String) -> Result<u64, String> {
+    let _gate = sequential::launch_gate().lock().await;
+    if sequential::active() { return Err("stop sequential automation before moving profiles".into()); }
     if !process::Tracker::shared().running().is_empty() {
         return Err("close every running profile first".into());
     }
@@ -1845,6 +1848,8 @@ fn portable_status() -> Result<PortableStatus, String> {
 /// the drive together and relaunches.
 #[tauri::command]
 async fn portable_enable() -> Result<String, String> {
+    let _gate = sequential::launch_gate().lock().await;
+    if sequential::active() { return Err("stop sequential automation before copying data".into()); }
     tauri::async_runtime::spawn_blocking(portable::enable)
         .await
         .map_err(|e| e.to_string())?
@@ -1870,6 +1875,7 @@ async fn portable_clear_local_cache() -> Result<Option<String>, String> {
 /// `app_quit` once it resolves.
 #[tauri::command]
 async fn portable_safe_close(window: tauri::Window) -> Result<(), String> {
+    sequential::stop_and_wait().await.map_err(|e| e.to_string())?;
     use tauri::Emitter;
 
     let running: Vec<String> = process::Tracker::shared()
@@ -1917,8 +1923,10 @@ async fn portable_safe_close(window: tauri::Window) -> Result<(), String> {
 /// Quit the launcher outright (bypasses minimize-to-tray). Used by the
 /// Safe-close dialog's Quit button.
 #[tauri::command]
-fn app_quit(app: tauri::AppHandle) {
+async fn app_quit(app: tauri::AppHandle) -> Result<(), String> {
+    sequential::stop_and_wait().await.map_err(|e| e.to_string())?;
     app.exit(0);
+    Ok(())
 }
 
 // ---- Automation API ----
@@ -2222,6 +2230,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if sequential::active() {
+                    api.prevent_close();
+                    use tauri::Manager;
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move { if let Err(e) = app_quit(app).await { notify_warning(e); } });
+                    return;
+                }
                 let to_tray = settings::load().map(|s| s.minimize_to_tray).unwrap_or(true);
                 if window.label() == "main" && to_tray {
                     api.prevent_close();
@@ -2325,6 +2340,9 @@ pub fn run() {
             launch,
             settings_get,
             settings_save,
+            sequential::sequential_start,
+            sequential::sequential_stop,
+            sequential::sequential_status,
             portable_status,
             portable_enable,
             portable_clear_local_cache,
@@ -2397,7 +2415,10 @@ pub fn run() {
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
                             "tray_show" => show_main_window(app),
-                            "tray_quit" => app.exit(0),
+                            "tray_quit" => {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move { if let Err(e) = app_quit(app).await { notify_warning(e); } });
+                            },
                             _ => {}
                         })
                         .on_tray_icon_event(|tray, e| {

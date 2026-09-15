@@ -2643,6 +2643,8 @@ async fn run_worker(
 }
 
 pub async fn start(project_id: &str) -> Result<()> {
+    let _gate = crate::sequential::launch_gate().lock().await;
+    if crate::sequential::active() { anyhow::bail!("stop sequential automation before starting a project"); }
     if migrate::in_progress() {
         return Err(anyhow!("profiles are being moved — try again when that finishes"));
     }

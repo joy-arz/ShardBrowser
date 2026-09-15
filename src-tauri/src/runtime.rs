@@ -710,6 +710,8 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
+    let _gate = crate::sequential::launch_gate().lock().await;
+    if crate::sequential::active() { return Err("stop sequential automation before updating the engine".into()); }
     let spec = host_spec().ok_or("Host platform has no published ShardX archive")?;
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
