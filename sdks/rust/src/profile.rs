@@ -126,6 +126,45 @@ impl Profile {
             .to_string()
     }
 
+    /// Whether the profile claims a device whose primary input is a finger.
+    pub fn claims_mobile(&self) -> bool {
+        let s = |path: [&str; 2]| {
+            self.config
+                .get(path[0])
+                .and_then(|v| v.get(path[1]))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+        if self
+            .config
+            .get("client_hints")
+            .and_then(|c| c.get("mobile"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        s(["client_hints", "platform"]).starts_with("android")
+            || s(["navigator", "user_agent"]).contains("android")
+    }
+
+    /// Whether the profile claims a DESKTOP Linux machine. Android is excluded:
+    /// its platform string is Linux too, and a phone does have WebGPU.
+    pub fn claims_linux_desktop(&self) -> bool {
+        if self.claims_mobile() {
+            return false;
+        }
+        let platform = self
+            .config
+            .get("navigator")
+            .and_then(|n| n.get("platform"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        platform.starts_with("linux") || platform.starts_with("x11")
+    }
+
     pub fn has_webgpu(&self) -> bool {
         self.config
             .get("webgpu")

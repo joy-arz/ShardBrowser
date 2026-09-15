@@ -25,6 +25,8 @@ export type ProxyTestSnapshot = {
   tcp_ms: number | null;
   udp_ms: number | null;
   udp_error: string | null;
+  /** Why this snapshot has no location. */
+  geo_error: string | null;
   provider: string;
 };
 

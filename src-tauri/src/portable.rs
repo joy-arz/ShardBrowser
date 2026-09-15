@@ -225,15 +225,33 @@ pub fn enable() -> Result<PathBuf> {
             dest.display()
         );
     }
-    let src = crate::store::config_root().context("locate current data root")?;
-    std::fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
-    copy_tree(&src, &dest)
-        .with_context(|| format!("copy {} into {}", src.display(), dest.display()))?;
-    eprintln!(
-        "[portable] created {} and copied existing data from {} (cache dirs skipped)",
-        dest.display(),
-        src.display()
-    );
+    if !crate::process::Tracker::shared().running().is_empty() || crate::migrate::in_progress() {
+        bail!("close all profiles and finish any data migration before making this install portable");
+    }
+    let src = crate::store::config_root().context("locate current config root")?;
+    let data = crate::store::data_root().context("locate current profile root")?;
+    if dest.starts_with(&src) || dest.starts_with(&data) {
+        bail!("the executable must be outside the current data directories");
+    }
+    let stage = dest.with_file_name(format!("ShardXData-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        std::fs::create_dir(&stage)?;
+        for entry in std::fs::read_dir(&src)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            // Runtime is per-machine; the heavy directories come from data_root.
+            if ["runtime", "profiles", "user-data", "extensions", "trash"].iter().any(|n| name == std::ffi::OsStr::new(n)) { continue; }
+            if entry.file_type()?.is_dir() { copy_tree(&entry.path(), &stage.join(name))?; }
+            else { std::fs::copy(entry.path(), stage.join(name))?; }
+        }
+        for name in ["profiles", "user-data", "extensions", "trash"] {
+            if data.join(name).is_dir() { copy_tree(&data.join(name), &stage.join(name))?; }
+        }
+        std::fs::rename(&stage, &dest)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_dir_all(&stage); }
+    result.context("copy portable data")?;
     Ok(dest)
 }
 

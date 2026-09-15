@@ -42,10 +42,19 @@ impl Tracker {
 
         {
             let mut g = self.inner.lock().unwrap();
-            g.insert(
+            let previous = g.insert(
                 profile_id.clone(),
                 ChildEntry { pid, killer: tx, cdp: None, started_at: Instant::now() },
             );
+            // Replacing the entry drops the old killer and orphans that browser.
+            // `launch` refuses a second launch up front; this is the backstop.
+            if let Some(prev) = previous {
+                eprintln!(
+                    "[tracker] {profile_id} was already tracked as pid {}; stopping it",
+                    prev.pid
+                );
+                let _ = prev.killer.try_send(());
+            }
         }
 
         // Graceful shutdown (SIGTERM / taskkill WM_CLOSE) → 5s → hard kill.
@@ -119,6 +128,14 @@ impl Tracker {
     }
 
     /// CDP endpoint when the profile was launched with remote debugging.
+    /// Whether a child is live for this profile.
+    pub fn is_running(&self, profile_id: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|g| g.contains_key(profile_id))
+            .unwrap_or(false)
+    }
+
     pub fn cdp(&self, profile_id: &str) -> Option<CdpInfo> {
         self.inner.lock().ok()?.get(profile_id)?.cdp.clone()
     }

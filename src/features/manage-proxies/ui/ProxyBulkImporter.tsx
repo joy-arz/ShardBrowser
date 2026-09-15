@@ -4,20 +4,22 @@ import Badge from "../../../shared/ui/Badge";
 import { RefreshIcon } from "../../../shared/icons";
 import { CountryFlag } from "../../../shared/ui/CountryFlag";
 import { toast } from "../../../shared/model/toast";
+import { useT } from "../../../shared/i18n";
 import type { ProxyEntry, BulkRowState } from "../../../entities/proxy";
 import { proxyBulkParse, proxyBulkSave, proxyFullTest } from "../../../entities/proxy";
 
 export function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const [text, setText] = useState("");
   const [kind, setKind] = useState<ProxyEntry["kind"]>("socks5");
   const [rows, setRows] = useState<BulkRowState[]>([]);
   const [busy, setBusy] = useState(false);
 
   const parse = async () => {
-    if (!text.trim()) { toast.err("Nothing to parse"); return; }
+    if (!text.trim()) { toast.err(t("proxyBulkImporter.nothingToParse")); return; }
     try {
       const parsed = await proxyBulkParse(text, kind);
-      if (parsed.length === 0) { toast.err("No valid proxy lines found"); return; }
+      if (parsed.length === 0) { toast.err(t("proxyBulkImporter.noValidLines")); return; }
       setRows(parsed.map((e) => ({ entry: e, selected: true, status: "idle" })));
     } catch (e) { toast.err(String(e)); }
   };
@@ -64,10 +66,10 @@ export function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
 
   const saveSelected = async () => {
     const entries = rows.filter((r) => r.selected).map((r) => r.entry);
-    if (entries.length === 0) { toast.err("Nothing selected"); return; }
+    if (entries.length === 0) { toast.err(t("proxyBulkImporter.nothingSelected")); return; }
     try {
       const n = await proxyBulkSave(entries);
-      toast.ok(`Imported ${n} prox${n === 1 ? "y" : "ies"}`);
+      toast.ok(n === 1 ? t("proxyBulkImporter.importedOne", { n }) : t("proxyBulkImporter.importedMany", { n }));
       onClose();
     } catch (e) { toast.err(String(e)); }
   };
@@ -79,16 +81,16 @@ export function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
     <Modal
       open
       onClose={onClose}
-      title="Bulk import proxies"
+      title={t("proxyBulkImporter.title")}
       maxWidthClassName="max-w-[750px]"
       footer={
         <div className="flex items-center justify-end gap-2">
-          <Button variant="neutral" mode="stroke" size="small" onClick={onClose}>Cancel</Button>
+          <Button variant="neutral" mode="stroke" size="small" onClick={onClose}>{t("proxyBulkImporter.cancel")}</Button>
           {rows.length === 0 ? (
-            <Button variant="primary" mode="filled" size="small" onClick={parse}>Parse →</Button>
+            <Button variant="primary" mode="filled" size="small" onClick={parse}>{t("proxyBulkImporter.parse")}</Button>
           ) : (
             <Button variant="primary" mode="filled" size="small" onClick={saveSelected}>
-              Import {selCount}
+              {t("proxyBulkImporter.importCount", { n: selCount })}
             </Button>
           )}
         </div>
@@ -98,7 +100,7 @@ export function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
         {rows.length === 0 ? (
           <>
             <Select
-              label="Default type (used when a line has no scheme)"
+              label={t("proxyBulkImporter.defaultTypeLabel")}
               size="small"
               value={kind}
               onChange={(v) => setKind(v as ProxyEntry["kind"])}
@@ -109,19 +111,15 @@ export function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
               ]}
             />
             <Textarea
-              label="Paste one proxy per line"
+              label={t("proxyBulkImporter.pasteLabel")}
               rows={12}
               className="mono"
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder={`socks5://user:pass@host:1080
-user:pass@host:1080
-host:1080:user:pass     # country=PL
-host:8080               # no auth
-# lines starting with # are ignored`}
+              placeholder={t("proxyBulkImporter.pastePlaceholder")}
             />
             <p className="m-0 text-paragraph-xs text-text-soft-400">
-              Duplicates (same host:port:user) are skipped on save.
+              {t("proxyBulkImporter.duplicatesNote")}
             </p>
           </>
         ) : (
@@ -129,13 +127,13 @@ host:8080               # no auth
             <div className="flex items-center gap-3 pb-1.5">
               <Checkbox
                 checked={allSel}
-                label={`${selCount} of ${rows.length} selected`}
+                label={t("proxyBulkImporter.selectedCount", { n: selCount, total: rows.length })}
                 onChange={(e) =>
                   setRows((rs) => rs.map((r) => ({ ...r, selected: e.target.checked })))
                 }
               />
               <div className="ml-auto flex gap-1.5">
-                <Button variant="neutral" mode="stroke" size="2xsmall" onClick={() => setRows([])}>← Back</Button>
+                <Button variant="neutral" mode="stroke" size="2xsmall" onClick={() => setRows([])}>{t("proxyBulkImporter.back")}</Button>
                 <Button
                   variant="neutral"
                   mode="stroke"
@@ -145,7 +143,7 @@ host:8080               # no auth
                   disabled={busy}
                   isLoading={busy}
                 >
-                  {busy ? "Testing…" : "Test all"}
+                  {busy ? t("proxyBulkImporter.testingAll") : t("proxyBulkImporter.testAll")}
                 </Button>
                 <Button
                   variant="neutral"
@@ -156,9 +154,9 @@ host:8080               # no auth
                       rs.map((r) => ({ ...r, selected: r.status === "ok" }))
                     )
                   }
-                  title="Tick only proxies whose latest test succeeded"
+                  title={t("proxyBulkImporter.keepWorkingHint")}
                 >
-                  ✓ Keep working only
+                  {t("proxyBulkImporter.keepWorkingOnly")}
                 </Button>
               </div>
             </div>
@@ -186,13 +184,13 @@ host:8080               # no auth
                     {r.entry.username && <span className="text-text-soft-400"> · {r.entry.username}</span>}
                   </span>
                   <div className="inline-flex items-center justify-end gap-1.5">
-                    {r.status === "idle" && <span className="text-text-soft-400">not tested</span>}
-                    {r.status === "testing" && <span className="text-text-soft-400">testing…</span>}
+                    {r.status === "idle" && <span className="text-text-soft-400">{t("proxyBulkImporter.notTested")}</span>}
+                    {r.status === "testing" && <span className="text-text-soft-400">{t("proxyBulkImporter.testingRow")}</span>}
                     {r.status === "ok" && (
                       <>
-                        <Badge color="success" variant="filled" size="small" title={`TCP ${r.tcp_ms} ms`}>Active</Badge>
+                        <Badge color="success" variant="filled" size="small" title={t("proxyBulkImporter.tcpTime", { ms: String(r.tcp_ms) })}>{t("proxyBulkImporter.active")}</Badge>
                         {r.entry.kind === "socks5" && r.udp_ms != null && (
-                          <Badge color="primary" variant="filled" size="small" title={`UDP relay works (${r.udp_ms} ms)`}>UDP</Badge>
+                          <Badge color="primary" variant="filled" size="small" title={t("proxyBulkImporter.udpRelayWorks", { ms: r.udp_ms })}>UDP</Badge>
                         )}
                         {r.country && (
                           <>
@@ -203,7 +201,7 @@ host:8080               # no auth
                       </>
                     )}
                     {r.status === "fail" && (
-                      <Badge color="error" variant="filled" size="small" title={r.error}>Failed</Badge>
+                      <Badge color="error" variant="filled" size="small" title={r.error}>{t("proxyBulkImporter.failed")}</Badge>
                     )}
                   </div>
                   <Button
@@ -213,7 +211,7 @@ host:8080               # no auth
                     onlyIcon
                     onClick={() => testOne(i)}
                     disabled={r.status === "testing"}
-                    title="Test this row"
+                    title={t("proxyBulkImporter.testRow")}
                     leftIcon={<RefreshIcon className="size-3.5" />}
                   />
                 </div>

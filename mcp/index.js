@@ -93,6 +93,108 @@ async function pageFor(profileId, opts) {
 const loc = (page, selector) => page.locator(selector).first();
 const TIMEOUT = 15000;
 
+// ---------- Motion: human pointer and keystrokes ----------
+//
+// The `Motion` domain is concatenated into the chrome-level protocol, and its
+// handler is built from the agent host's WebContents — so it needs a session on
+// a PAGE target. A browser-level session gets a handler with no tab behind it
+// and answers "no live frame" to every command. These wrappers only turn a
+// selector into the coordinates the domain wants.
+
+const motion = new Map(); // profile_id → { page, session, pointer }
+
+async function motionFor(profileId, opts) {
+  const page = await pageFor(profileId, opts);
+  const cur = motion.get(profileId);
+  if (cur && cur.page === page && !page.isClosed()) return cur;
+  // A new page means a new session, and a pointer that does not exist on it.
+  const m = { page, session: await page.context().newCDPSession(page), pointer: false };
+  motion.set(profileId, m);
+  return m;
+}
+
+// Resting cursor position. Never the target — a glide starting on top of what
+// it aims at has no trajectory and no duration.
+async function ensurePointer(m, page) {
+  if (m.pointer) return;
+  const [w, h] = await page
+    .evaluate(() => [window.innerWidth, window.innerHeight])
+    .catch(() => [1280, 800]);
+  await m.session.send("Motion.createPointer", {
+    x: Math.round(w * 0.15),
+    y: Math.round(h * 0.8),
+  });
+  m.pointer = true;
+}
+
+// Selector → viewport point. Scrolled into view first; `width` travels along
+// because it feeds Fitts's law in the core.
+async function targetOf(page, selector, { timeout = TIMEOUT, dx, dy } = {}) {
+  const l = loc(page, selector);
+  await l.waitFor({ state: "visible", timeout });
+  await l.scrollIntoViewIfNeeded({ timeout });
+  const box = await l.boundingBox({ timeout });
+  if (!box) throw new Error(`element is not rendered, so it has no coordinates: ${selector}`);
+  return {
+    x: Math.round(box.x + (typeof dx === "number" ? dx : box.width / 2)),
+    y: Math.round(box.y + (typeof dy === "number" ? dy : box.height / 2)),
+    width: Math.round(box.width),
+    height: Math.round(box.height),
+  };
+}
+
+// Either a selector or an explicit point, resolved the same way.
+async function pointOf(page, { selector, x, y, offset_x, offset_y }) {
+  if (selector) {
+    return targetOf(page, selector, { dx: offset_x, dy: offset_y });
+  }
+  if (typeof x !== "number" || typeof y !== "number") {
+    throw new Error("give either a selector or both x and y");
+  }
+  return { x: Math.round(x), y: Math.round(y), width: 32, height: 32 };
+}
+
+// Touch and pointer are exclusive in the core: a profile claiming a touchscreen
+// refuses Motion.tap and glideTo, and one that does not refuses every finger
+// command. So the tools ask the page which it is instead of making the caller
+// remember, and the human_* tools reach for a finger when the answer is a phone.
+
+const touchClaim = new Map(); // profile_id → boolean
+
+async function isTouch(profileId, page) {
+  if (touchClaim.has(profileId)) return touchClaim.get(profileId);
+  const v = await page.evaluate(() => navigator.maxTouchPoints > 0).catch(() => false);
+  touchClaim.set(profileId, !!v);
+  return !!v;
+}
+
+// A finger needs no resting position, so unlike pointOf this carries whether a
+// selector was named: only then is the element's real width worth sending, and
+// without it the core's own 44 px assumption is the better one.
+async function fingerPoint(page, { selector, x, y, offset_x, offset_y }) {
+  const t = await pointOf(page, { selector, x, y, offset_x, offset_y });
+  return selector ? t : { ...t, width: undefined };
+}
+
+async function requireTouch(profileId, page, what) {
+  if (!(await isTouch(profileId, page))) {
+    throw new Error(
+      `${what} is a finger gesture and this profile has no touchscreen — ` +
+        "start a phone profile, or use the human_* tools",
+    );
+  }
+}
+
+async function glide(m, page, target) {
+  await ensurePointer(m, page);
+  const r = await m.session.send("Motion.glideTo", {
+    x: target.x,
+    y: target.y,
+    targetWidth: target.width,
+  });
+  return r?.durationMs ?? 0;
+}
+
 // ---------- helpers ----------
 
 const text = (v) => ({
@@ -135,15 +237,24 @@ server.tool(
     proxy: z.string().optional(),
     proxy_id: z.string().optional(),
     platform: z.enum(["Windows", "macOS", "Linux"]).optional(),
+    // Icon and omnibox-pill accent. Omit to derive it from the name.
+    color: z.string().optional(),
+    // Extension-library ids; see list_extensions.
+    extensions: z.array(z.string()).optional(),
+    // Claimed display refresh rate in Hz. A page reads this by timing frames,
+    // not by asking; absent means the engine's 60, which is what most machines
+    // report. Frames can only be slowed, so a rate above the host's own screen
+    // runs at the host's.
+    refresh_rate: z.number().int().min(24).max(480).optional(),
     fingerprint: z.any().optional(),
   },
-  async ({ name, notes, folder, proxy, proxy_id, platform, fingerprint }) => {
+  async ({ name, notes, folder, proxy, proxy_id, platform, color, extensions, refresh_rate, fingerprint }) => {
     if (!fingerprint) {
       const fp = await api(platform ? `/fingerprint/new/${platform}` : "/fingerprint/new");
       fingerprint = fp.fingerprint;
     }
     const path = folder ? `/folders/${encodeURIComponent(folder)}/profiles` : "/profiles";
-    const body = { name, notes, proxy, proxy_id, fingerprint };
+    const body = { name, notes, proxy, proxy_id, color, extensions, refresh_rate, fingerprint };
     if (folder) delete body.folder; // folder comes from the path
     return text(await api(path, { method: "POST", body }));
   },
@@ -151,20 +262,37 @@ server.tool(
 
 server.tool(
   "create_temporary_profile",
-  "Create a TEMPORARY profile (hidden from the list, auto-deleted on close). Random/specified fingerprint, optional inline proxy string.",
+  "Create a TEMPORARY profile (hidden from the list, auto-deleted on close). Random/specified fingerprint, optional inline proxy string and noise.",
   {
     fingerprint_id: z.string().optional(),
     platform: z.enum(["Windows", "macOS", "Linux"]).optional(),
     proxy: z.string().optional(),
     name: z.string().optional(),
     folder: z.string().optional(),
+    // `{canvas: true}` or a full block; omitted vectors stay off.
+    noise: z
+      .record(
+        z.enum(["canvas", "webgl", "audio", "client_rects", "sensors", "fonts"]),
+        z.union([
+          z.boolean(),
+          z.object({
+            enabled: z.boolean().optional(),
+            seed: z.number().int().optional(),
+            intensity: z.number().optional(),
+            max_offset: z.number().optional(),
+          }),
+        ]),
+      )
+      .optional(),
+    // Claimed display refresh rate in Hz; absent means the engine's 60.
+    refresh_rate: z.number().int().min(24).max(480).optional(),
   },
   async (args) => text(await api("/profiles/temporary", { method: "POST", body: args })),
 );
 
 server.tool(
   "edit_profile",
-  "Edit a profile. Only provided fields change; `fingerprint` replaces it verbatim; folder:'' unfiles; proxy_id:'' unbinds.",
+  "Edit a profile. Only provided fields change; `fingerprint` replaces it verbatim; folder:'' unfiles; proxy_id:'' unbinds; color:'' goes back to the name-derived one; `extensions` replaces the whole list.",
   {
     id: z.string(),
     name: z.string().optional(),
@@ -172,6 +300,10 @@ server.tool(
     folder: z.string().optional(),
     proxy_id: z.string().optional(),
     proxy: z.string().optional(),
+    color: z.string().optional(),
+    extensions: z.array(z.string()).optional(),
+    // Claimed display refresh rate in Hz; applied after `fingerprint`.
+    refresh_rate: z.number().int().min(24).max(480).optional(),
     fingerprint: z.any().optional(),
   },
   async ({ id, ...body }) => text(await api(`/profiles/${id}`, { method: "PATCH", body })),
@@ -179,14 +311,14 @@ server.tool(
 
 server.tool(
   "delete_profile",
-  "Delete a profile (config + user-data-dir).",
+  "Move a profile to the trash, restorable for 7 days (see list_trash / restore_profile).",
   { id: z.string() },
   async ({ id }) => text(await api(`/profiles/${id}`, { method: "DELETE" })),
 );
 
 server.tool(
   "start_profile",
-  "Launch a profile with CDP. Returns { pid, cdp:{ web_socket_debugger_url, http_url } }. Set headless to run without a window.",
+  "Launch a profile with CDP. Returns { pid, cdp:{ web_socket_debugger_url, http_url } }. The call waits up to 30s for the endpoint; if it still has none, cdp is null and cdp_error says why. Set headless to run without a window.",
   { id: z.string(), headless: z.boolean().optional() },
   async ({ id, headless }) =>
     text(await api(`/profiles/${id}/start`, { method: "POST", body: { headless: !!headless } })),
@@ -199,6 +331,7 @@ server.tool(
   async ({ id }) => {
     const b = browsers.get(id);
     if (b) { try { await b.close(); } catch {} browsers.delete(id); }
+    motion.delete(id);
     return text(await api(`/profiles/${id}/stop`, { method: "POST" }));
   },
 );
@@ -265,6 +398,80 @@ server.tool(
   async ({ id }) => text(await api(`/proxies/${id}`, { method: "DELETE" })),
 );
 
+// ---- extensions ----
+
+server.tool(
+  "list_extensions",
+  "Extensions in the library, with ids to pass to create_profile / edit_profile.",
+  {},
+  async () => text(await api("/extensions")),
+);
+
+server.tool(
+  "add_extension",
+  "Add an extension. `url` takes a Web Store page, a bare extension id, or a direct .crx/.zip link — the launcher downloads it. `path` takes a local file or unpacked folder.",
+  { url: z.string().optional(), path: z.string().optional() },
+  async (args) => text(await api("/extensions", { method: "POST", body: args })),
+);
+
+server.tool(
+  "delete_extension",
+  "Remove an extension from the library. Profiles that named it stop loading it on their next start.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/extensions/${id}`, { method: "DELETE" })),
+);
+
+// ---- bookmarks ----
+
+server.tool(
+  "list_bookmarks",
+  "Folder-scoped bookmarks pushed into profiles.",
+  {},
+  async () => text(await api("/bookmarks")),
+);
+
+server.tool(
+  "save_bookmark",
+  "Add or update a bookmark. Bound to a folder it reaches every profile in it; folder '' means every profile. Applied on each profile's next launch.",
+  {
+    id: z.string().optional(),
+    url: z.string(),
+    title: z.string().optional(),
+    folder: z.string().optional(),
+  },
+  async (args) => text(await api("/bookmarks", { method: "POST", body: args })),
+);
+
+server.tool(
+  "delete_bookmark",
+  "Delete a bookmark; it leaves its profiles on their next launch.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/bookmarks/${id}`, { method: "DELETE" })),
+);
+
+// ---- trash ----
+
+server.tool(
+  "list_trash",
+  "Deleted profiles still restorable, with the day each one expires.",
+  {},
+  async () => text(await api("/trash")),
+);
+
+server.tool(
+  "restore_profile",
+  "Bring a deleted profile back under its own id, with its cookies and logins.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/trash/${id}/restore`, { method: "POST" })),
+);
+
+server.tool(
+  "purge_profile",
+  "Delete a trashed profile for good. There is nothing after this.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/trash/${id}`, { method: "DELETE" })),
+);
+
 server.tool(
   "export_cookies",
   "Export a profile's cookies (decrypted).",
@@ -278,6 +485,120 @@ server.tool(
   { id: z.string(), cookies: z.array(z.any()) },
   async ({ id, cookies }) =>
     text(await api(`/profiles/${id}/cookies`, { method: "POST", body: { cookies } })),
+);
+
+// ================= Automation projects =================
+// A project drives its own browsers through the Motion domain, not CDP, so these
+// work whether or not a profile is running.
+
+server.tool(
+  "list_automation_projects",
+  "List automation projects with their blocks and run settings.",
+  {},
+  async () => text(await api("/automation/projects")),
+);
+
+server.tool(
+  "get_automation_project",
+  "Get one automation project by id.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/projects/${id}`)),
+);
+
+server.tool(
+  "create_automation_project",
+  "Create an empty automation project. Add steps with save_automation_project.",
+  { name: z.string().optional() },
+  async ({ name }) =>
+    text(await api("/automation/projects", { method: "POST", body: { name } })),
+);
+
+server.tool(
+  "save_automation_project",
+  "Replace a project whole — send it back the way get_automation_project returned it, with `blocks` and `run` edited. The id in the path wins.",
+  { id: z.string(), project: z.any() },
+  async ({ id, project }) =>
+    text(await api(`/automation/projects/${id}`, { method: "PUT", body: project })),
+);
+
+server.tool(
+  "delete_automation_project",
+  "Delete an automation project. This one is not a trash — it is gone.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/projects/${id}`, { method: "DELETE" })),
+);
+
+server.tool(
+  "duplicate_automation_project",
+  "Copy an automation project.",
+  { id: z.string() },
+  async ({ id }) =>
+    text(await api(`/automation/projects/${id}/duplicate`, { method: "POST" })),
+);
+
+server.tool(
+  "export_automation_project",
+  "Export a project as a bundle. Any module its steps call travels inside the bundle. Parameters the project marked secret come out empty, and `needs` says which ones.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/projects/${id}/export`)),
+);
+
+server.tool(
+  "import_automation_project",
+  "Import a project bundle; it arrives as a new project with a new id. Modules carried in the bundle are installed first, except where one is already installed under the same id \u2014 that one is kept.",
+  { bundle: z.any() },
+  async ({ bundle }) =>
+    text(await api("/automation/import", { method: "POST", body: bundle })),
+);
+
+server.tool(
+  "run_automation_project",
+  "Start a project. Answers as soon as the run is under way — the browsers it needs come from its own profile blocks. Poll automation_status for progress.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/projects/${id}/run`, { method: "POST" })),
+);
+
+server.tool(
+  "stop_automation_project",
+  "Ask a run to stop. Each browser finishes the step it is in and then closes, so the run does not end the instant this answers.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/projects/${id}/stop`, { method: "POST" })),
+);
+
+server.tool(
+  "automation_status",
+  "How a run is going: each worker's pass, step and status, plus the tail of the log. Null when the project is not running.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/projects/${id}/status`)),
+);
+
+server.tool(
+  "list_automation_runs",
+  "Every automation run going right now.",
+  {},
+  async () => text(await api("/automation/runs")),
+);
+
+server.tool(
+  "list_automation_modules",
+  "List installed WebAssembly modules. Each contributes blocks under the kind `module:<module id>:<block>`.",
+  {},
+  async () => text(await api("/automation/modules")),
+);
+
+server.tool(
+  "install_automation_module",
+  "Install a .wasm module from a path on this machine.",
+  { path: z.string() },
+  async ({ path }) =>
+    text(await api("/automation/modules", { method: "POST", body: { path } })),
+);
+
+server.tool(
+  "remove_automation_module",
+  "Remove a module. Projects using its blocks stop working; nothing rewrites them.",
+  { id: z.string() },
+  async ({ id }) => text(await api(`/automation/modules/${id}`, { method: "DELETE" })),
 );
 
 // ================= CDP browser tools (patchright) =================
@@ -1134,6 +1455,380 @@ server.tool(
     });
     await client.detach().catch(() => {});
     return text({ offline: !!offline, latency_ms: latency_ms ?? 0, download_kbps: download_kbps ?? 0, upload_kbps: upload_kbps ?? 0 });
+  },
+);
+
+// ---- human input (Motion domain) ----
+//
+// Prefer over browser_click / browser_type where a site watches how input
+// arrives. They cost real time, which is the point.
+
+server.tool(
+  "human_move",
+  "Move the pointer to an element (or a point) along a human trajectory. Give either selector or x+y.",
+  {
+    profile_id: z.string(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    offset_x: z.number().optional(),
+    offset_y: z.number().optional(),
+  },
+  async ({ profile_id, selector, x, y, offset_x, offset_y }) => {
+    const page = await pageFor(profile_id);
+    // A phone has no cursor and nothing to hover with. Refused rather than
+    // approximated: a menu that opens on hover has no touch equivalent, and a
+    // tap in its place would be a different thing that looked like success.
+    if (await isTouch(profile_id, page)) {
+      throw new Error(
+        "this profile is a phone and has no cursor — use touch_tap or touch_long_press",
+      );
+    }
+    const m = await motionFor(profile_id);
+    const t = await pointOf(page, { selector, x, y, offset_x, offset_y });
+    const ms = await glide(m, page, t);
+    return text({ x: t.x, y: t.y, duration_ms: ms });
+  },
+);
+
+server.tool(
+  "human_click",
+  "Move to an element (or a point) and click it the way a person does. Give either selector or x+y.",
+  {
+    profile_id: z.string(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    offset_x: z.number().optional(),
+    offset_y: z.number().optional(),
+    button: z.enum(["left", "middle", "right"]).optional(),
+    click_count: z.number().int().min(1).max(3).optional(),
+  },
+  async ({ profile_id, selector, x, y, offset_x, offset_y, button, click_count }) => {
+    const page = await pageFor(profile_id);
+    const m = await motionFor(profile_id);
+    const t = await pointOf(page, { selector, x, y, offset_x, offset_y });
+    // One tool, two bodies: the caller says WHAT, the profile decides WHAT
+    // WITH. The core refuses a pointer on a handset outright, so on a phone
+    // this has to reach for a finger — and the phone's context menu IS a
+    // long press.
+    if (await isTouch(profile_id, page)) {
+      const cmd = button === "right" ? "Motion.touchLongPress" : "Motion.touchTap";
+      const args =
+        button === "right"
+          ? { x: t.x, y: t.y }
+          : { x: t.x, y: t.y, tapCount: click_count ?? 1 };
+      if (selector) args.targetWidth = t.width;
+      const r = await m.session.send(cmd, args);
+      return text({
+        tapped: selector ?? `${t.x},${t.y}`,
+        duration_ms: r?.durationMs ?? 0,
+      });
+    }
+    const ms = await glide(m, page, t);
+    await m.session.send("Motion.tap", {
+      button: button ?? "left",
+      clickCount: click_count ?? 1,
+    });
+    return text({ clicked: selector ?? `${t.x},${t.y}`, duration_ms: ms });
+  },
+);
+
+server.tool(
+  "human_type",
+  "Type text into whatever currently has focus, key by key with human timing. Use human_fill to focus a field first.",
+  {
+    profile_id: z.string(),
+    text: z.string(),
+    allow_typos: z.boolean().optional(),
+  },
+  async ({ profile_id, text: value, allow_typos }) => {
+    const page = await pageFor(profile_id);
+    const m = await motionFor(profile_id);
+    // enterText goes to whatever the page has focused and needs no pointer;
+    // creating one is only how a desktop profile gets its resting cursor, and
+    // on a phone the core refuses it.
+    if (!(await isTouch(profile_id, page))) await ensurePointer(m, page);
+    const r = await m.session.send("Motion.enterText", {
+      text: value,
+      allowTypos: !!allow_typos,
+    });
+    return text({ typed: value.length, duration_ms: r?.durationMs ?? 0 });
+  },
+);
+
+server.tool(
+  "human_fill",
+  "Click a field and type into it, both humanly. The one to reach for on a form.",
+  {
+    profile_id: z.string(),
+    selector: z.string(),
+    text: z.string(),
+    // Triple-clicks to select first; without it the text is appended.
+    clear: z.boolean().optional(),
+    allow_typos: z.boolean().optional(),
+  },
+  async ({ profile_id, selector, text: value, clear, allow_typos }) => {
+    const page = await pageFor(profile_id);
+    const m = await motionFor(profile_id);
+    const t = await targetOf(page, selector);
+    let moved = 0;
+    if (await isTouch(profile_id, page)) {
+      // A triple click selects the old value; a phone has no such gesture, so
+      // `clear` empties the field the way a thumb would — via the field itself.
+      const r = await m.session.send("Motion.touchTap", {
+        x: t.x,
+        y: t.y,
+        targetWidth: t.width,
+      });
+      moved = r?.durationMs ?? 0;
+      if (clear) {
+        await page.fill(selector, "").catch(() => {});
+      }
+    } else {
+      moved = await glide(m, page, t);
+      await m.session.send("Motion.tap", { button: "left", clickCount: clear ? 3 : 1 });
+    }
+    const r = await m.session.send("Motion.enterText", {
+      text: value,
+      allowTypos: !!allow_typos,
+    });
+    return text({
+      filled: selector,
+      at: `${t.x},${t.y}`,
+      move_ms: moved,
+      type_ms: r?.durationMs ?? 0,
+    });
+  },
+);
+
+server.tool(
+  "human_release_pointer",
+  "Drop this profile's pointer. Rarely needed — the next human_* call makes a new one.",
+  { profile_id: z.string() },
+  async ({ profile_id }) => {
+    const m = motion.get(profile_id);
+    if (m?.pointer) {
+      await m.session.send("Motion.destroyPointer").catch(() => {});
+      m.pointer = false;
+    }
+    return text("pointer released");
+  },
+);
+
+// ---------- Motion: finger gestures and the handset itself ----------
+//
+// The gestures a cursor cannot make. Everything above already becomes a touch
+// on a phone profile — these are the ones with no desktop twin.
+
+server.tool(
+  "touch_tap",
+  "Tap an element (or a point) with a finger. Phone profiles only. Give either selector or x+y.",
+  {
+    profile_id: z.string(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    offset_x: z.number().optional(),
+    offset_y: z.number().optional(),
+    // 2 gives a double tap with a realistic gap and a realistic offset between
+    // the two contacts.
+    tap_count: z.number().int().min(1).max(3).optional(),
+  },
+  async ({ profile_id, selector, x, y, offset_x, offset_y, tap_count }) => {
+    const page = await pageFor(profile_id);
+    await requireTouch(profile_id, page, "touch_tap");
+    const m = await motionFor(profile_id);
+    const t = await fingerPoint(page, { selector, x, y, offset_x, offset_y });
+    const r = await m.session.send("Motion.touchTap", {
+      x: t.x,
+      y: t.y,
+      ...(t.width ? { targetWidth: t.width } : {}),
+      tapCount: tap_count ?? 1,
+    });
+    return text({ tapped: selector ?? `${t.x},${t.y}`, duration_ms: r?.durationMs ?? 0 });
+  },
+);
+
+server.tool(
+  "touch_long_press",
+  "Press and hold — the gesture that opens a context menu on a phone. Phone profiles only.",
+  {
+    profile_id: z.string(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    offset_x: z.number().optional(),
+    offset_y: z.number().optional(),
+    // Omit for the profile's own hold. Whatever is asked, the core floors it
+    // above the browser's long-press threshold — a shorter hold is a slow tap
+    // and produces a click instead of a menu.
+    hold_ms: z.number().optional(),
+  },
+  async ({ profile_id, selector, x, y, offset_x, offset_y, hold_ms }) => {
+    const page = await pageFor(profile_id);
+    await requireTouch(profile_id, page, "touch_long_press");
+    const m = await motionFor(profile_id);
+    const t = await fingerPoint(page, { selector, x, y, offset_x, offset_y });
+    const r = await m.session.send("Motion.touchLongPress", {
+      x: t.x,
+      y: t.y,
+      ...(typeof hold_ms === "number" ? { holdMs: hold_ms } : {}),
+    });
+    return text({ pressed: selector ?? `${t.x},${t.y}`, duration_ms: r?.durationMs ?? 0 });
+  },
+);
+
+server.tool(
+  "touch_swipe",
+  "Swipe a finger across the glass — the way a phone scrolls. Start at a selector or x+y (default: the middle of the viewport), then give either dx+dy or to_x+to_y. Phone profiles only.",
+  {
+    profile_id: z.string(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    dx: z.number().optional(),
+    dy: z.number().optional(),
+    to_x: z.number().optional(),
+    to_y: z.number().optional(),
+    // true lifts the finger while it is still moving, which is what flings the
+    // page. Omit to let the profile decide — a fleet where every swipe flicks
+    // is as uniform as one where none do.
+    flick: z.boolean().optional(),
+  },
+  async ({ profile_id, selector, x, y, dx, dy, to_x, to_y, flick }) => {
+    const page = await pageFor(profile_id);
+    await requireTouch(profile_id, page, "touch_swipe");
+    const m = await motionFor(profile_id);
+    let from;
+    if (selector || (typeof x === "number" && typeof y === "number")) {
+      from = await fingerPoint(page, { selector, x, y });
+    } else {
+      const [w, h] = await page
+        .evaluate(() => [window.innerWidth, window.innerHeight])
+        .catch(() => [390, 844]);
+      from = { x: Math.round(w / 2), y: Math.round(h / 2) };
+    }
+    const toX = typeof to_x === "number" ? to_x : from.x + (dx ?? 0);
+    const toY = typeof to_y === "number" ? to_y : from.y + (dy ?? 0);
+    if (toX === from.x && toY === from.y) {
+      throw new Error("a swipe of nothing goes nowhere — give dx/dy or to_x/to_y");
+    }
+    const r = await m.session.send("Motion.touchSwipe", {
+      fromX: from.x,
+      fromY: from.y,
+      toX: Math.round(toX),
+      toY: Math.round(toY),
+      ...(typeof flick === "boolean" ? { flick } : {}),
+    });
+    return text({
+      from: `${from.x},${from.y}`,
+      to: `${Math.round(toX)},${Math.round(toY)}`,
+      duration_ms: r?.durationMs ?? 0,
+    });
+  },
+);
+
+server.tool(
+  "touch_drag",
+  "Press, wait for the item to be picked up, carry it and set it down — a list reorder, a card moved between columns. Different from touch_swipe in the wait, which is what makes it a drag and not a scroll. Phone profiles only.",
+  {
+    profile_id: z.string(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    to_selector: z.string().optional(),
+    to_x: z.number().optional(),
+    to_y: z.number().optional(),
+    hold_ms: z.number().optional(),
+  },
+  async ({ profile_id, selector, x, y, to_selector, to_x, to_y, hold_ms }) => {
+    const page = await pageFor(profile_id);
+    await requireTouch(profile_id, page, "touch_drag");
+    const m = await motionFor(profile_id);
+    const from = await fingerPoint(page, { selector, x, y });
+    const to = to_selector
+      ? await fingerPoint(page, { selector: to_selector })
+      : await fingerPoint(page, { x: to_x, y: to_y });
+    const r = await m.session.send("Motion.touchDrag", {
+      fromX: from.x,
+      fromY: from.y,
+      toX: to.x,
+      toY: to.y,
+      ...(typeof hold_ms === "number" ? { holdMs: hold_ms } : {}),
+    });
+    return text({
+      from: selector ?? `${from.x},${from.y}`,
+      to: to_selector ?? `${to.x},${to.y}`,
+      duration_ms: r?.durationMs ?? 0,
+    });
+  },
+);
+
+server.tool(
+  "touch_pinch",
+  "Two fingers converging on or spreading from a point. Above 1 zooms in, below 1 zooms out. Phone profiles only.",
+  {
+    profile_id: z.string(),
+    scale: z.number().positive(),
+    selector: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    // Degrees the line between the contacts turns over the gesture. Omit for
+    // the profile's own, which is never zero — a hand cannot pinch without it.
+    rotation: z.number().optional(),
+  },
+  async ({ profile_id, scale, selector, x, y, rotation }) => {
+    const page = await pageFor(profile_id);
+    await requireTouch(profile_id, page, "touch_pinch");
+    const m = await motionFor(profile_id);
+    let at;
+    if (selector || (typeof x === "number" && typeof y === "number")) {
+      at = await fingerPoint(page, { selector, x, y });
+    } else {
+      const [w, h] = await page
+        .evaluate(() => [window.innerWidth, window.innerHeight])
+        .catch(() => [390, 844]);
+      at = { x: Math.round(w / 2), y: Math.round(h / 2) };
+    }
+    const r = await m.session.send("Motion.pinch", {
+      x: at.x,
+      y: at.y,
+      scale,
+      ...(typeof rotation === "number" ? { rotation } : {}),
+    });
+    return text({ at: `${at.x},${at.y}`, scale, duration_ms: r?.durationMs ?? 0 });
+  },
+);
+
+server.tool(
+  "rotate_screen",
+  "Turn the handset. The sensors move first and the picture commits at the end, which is the order a real phone produces. Answers when the new angle has reached the page, so screen.width read straight afterwards is already the turned one. Phone profiles only.",
+  {
+    profile_id: z.string(),
+    // Clockwise from the orientation the profile was written in.
+    angle: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+    // Omit for the profile's own, drawn from its motion seed. The core clamps
+    // to 400–2000 ms: a faster turn is sampled a couple of dozen times by
+    // devicemotion and once by a 5 Hz Accelerometer, and the two APIs would
+    // then be shown different turns.
+    turn_ms: z.number().optional(),
+  },
+  async ({ profile_id, angle, turn_ms }) => {
+    const page = await pageFor(profile_id);
+    await requireTouch(profile_id, page, "rotate_screen");
+    const m = await motionFor(profile_id);
+    const r = await m.session.send("Motion.setOrientation", {
+      angle,
+      ...(typeof turn_ms === "number" ? { turnMs: turn_ms } : {}),
+    });
+    return text({
+      angle: r?.angle ?? angle,
+      type: r?.type,
+      screen_width: r?.screenWidth,
+      screen_height: r?.screenHeight,
+      duration_ms: r?.durationMs ?? 0,
+    });
   },
 );
 

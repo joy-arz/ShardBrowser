@@ -90,6 +90,8 @@ pub struct LaunchOptions {
     pub platform: Option<String>,
     /// Re-pick hardware_concurrency / device_memory / platform_version.
     pub randomize: bool,
+    /// Claim the protected-video support a phone has. Mobile profiles only.
+    pub android_media: bool,
 }
 
 /// A running engine process + the decisions made at launch.
@@ -198,8 +200,14 @@ impl Browser {
             format!("--user-data-dir={}", udd.display()),
             "--no-first-run".into(),
         ];
-        if !profile.has_webgpu() {
+        // A profile claiming desktop Linux keeps navigator.gpu and answers the
+        // adapter request with nothing, which is what Chrome on Linux does;
+        // disabling the feature would remove the object as well.
+        if !profile.has_webgpu() && !profile.claims_linux_desktop() {
             argv.push("--disable-features=WebGPU".into());
+        }
+        if opts.android_media && profile.claims_mobile() {
+            argv.push("--shardx-android-media".into());
         }
         if !opts.headless && !opts.cdp {
             argv.push("--restore-last-session".into());

@@ -6,25 +6,26 @@ import { CSSelect } from "../../../shared/ui/CSSelect";
 import { ChevronDownIcon, InfoIcon } from "../../../shared/icons";
 import { toast } from "../../../shared/model/toast";
 import { randSid } from "../../../shared/lib/utils";
+import { useT } from "../../../shared/i18n";
 import type { ResiType, PsLoc } from "../../../entities/proxyshard";
-import { PS_PLAN, PS_PROXY_TYPE, PS_RELAYS, PS_PORT, psProfileTraffic, psCountries, psRegions, psCities } from "../../../entities/proxyshard";
+import { PS_PLAN, PS_PROXY_TYPE, PS_RELAYS, PS_PORT, psProfileTraffic, psCountries, psRegions, psCities, psResiIsps } from "../../../entities/proxyshard";
 import { proxyBulkSave } from "../../../entities/proxy";
 
 
-const SESSION_MODE_OPTIONS: SelectOption[] = [
+const sessionModeOptions = (t: (key: string) => string): SelectOption[] => [
   {
-    label: "Default(after 5sec)",
+    label: t("psResiGenerator.sessionModeDefaultOption"),
     value: "default"
   },
   {
-    label: "Static",
+    label: t("psResiGenerator.sessionModeStaticOption"),
     value: "static"
   }
 ]
 
-const POF_OPTIONS: SelectOption[] = [
+const pofOptions = (t: (key: string) => string): SelectOption[] => [
   {
-    label: "Unset",
+    label: t("psResiGenerator.osUnset"),
     value: "unset"
   },
   {
@@ -54,12 +55,13 @@ const PROTO_OPTIONS: SelectOption[] = [
   { value: "socks5", label: "SOCKS5" },
 ];
 
-const SESSION_OPTIONS: SelectOption[] = [
-  { value: "rotating", label: "Rotating" },
-  { value: "sticky", label: "Sticky" },
+const sessionOptions = (t: (key: string) => string): SelectOption[] => [
+  { value: "rotating", label: t("psResiGenerator.sessionRotating") },
+  { value: "sticky", label: t("psResiGenerator.sessionSticky") },
 ];
 
 export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: () => void }) {
+  const t = useT();
   const plan = PS_PLAN[type];
   const pt = PS_PROXY_TYPE[type];
   const [password, setPassword] = useState("");
@@ -70,10 +72,11 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
   const [count, setCount] = useState(1);
   const [prefix, setPrefix] = useState(`${type} resi`);
   const [sessionMode, setSessionMode] = useState<"default" | "static">("default");
-  // setPof is unused today — the generator reads `pof` when building the
-  // session string but nothing changes it yet.  Kept as state (not a const)
-  // so wiring the OS selector back up is a one-line change.
-  const [pof] = useState<"unset" | "macos" | "windows" | "android" | "linux" | "ios">("unset");
+  // The OS the exit device should look like. Premium only — the other plans
+  // ignore the token, so the field is not offered there and is dropped if the
+  // dialog is reopened on a cheaper plan.
+  const [pof, setPof] = useState<"unset" | "macos" | "windows" | "android" | "linux" | "ios">("unset");
+  const canPickOs = type === "premium";
   const [showAdvanced, setShowAdvanced] = useState(false);
 
 
@@ -83,6 +86,8 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
   const [region, setRegion] = useState("");
   const [cities, setCities] = useState<PsLoc[]>([]);
   const [city, setCity] = useState("");
+  const [isps, setIsps] = useState<PsLoc[]>([]);
+  const [isp, setIsp] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -90,7 +95,7 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
       .then((r) => {
         const p = r.proxy_password ?? r.password ?? "";
         setPassword(p);
-        if (!p) setPwErr("The API didn't return a residential password for this plan.");
+        if (!p) setPwErr(t("psResiGenerator.noPasswordError"));
       })
       .catch((e) => setPwErr(String(e)));
     psCountries(pt)
@@ -100,32 +105,40 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
 
   // Region depends on country; city depends on region.
   useEffect(() => {
-    setRegion(""); setRegions([]); setCity(""); setCities([]);
+    setRegion(""); setRegions([]); setCity(""); setCities([]); setIsp(""); setIsps([]);
     if (!country) return;
     psRegions(pt, country)
       .then((r) => setRegions(r.results ?? [])).catch(() => { });
   }, [country]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    setCity(""); setCities([]);
+    setCity(""); setCities([]); setIsp(""); setIsps([]);
     if (!country || !region) return;
     psCities(pt, country, region)
       .then((r) => setCities(r.results ?? [])).catch(() => { });
   }, [region]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ISP directory is per-city and premium-only.
+  useEffect(() => {
+    setIsp(""); setIsps([]);
+    if (type !== "premium" || !country || !region || !city) return;
+    psResiIsps(pt, country, region, city)
+      .then((r) => setIsps(r.results ?? [])).catch(() => { });
+  }, [city]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const buildUser = (sid: string | null) => {
     const parts = [`plan-${plan}`];
     if (country) parts.push(`country-${country.toLowerCase()}`);
     if (region) parts.push(`region-${region}`);
     if (city) parts.push(`city-${city}`);
+    if (isp) parts.push(`isp-${isp}`);
     if (sid) parts.push(`sid-${sid}`);
-    if (pof && pof !== "unset") parts.push(`os-${pof}`);
+    if (canPickOs && pof !== "unset") parts.push(`os-${pof}`);
     if (sessionMode === "default") parts.push("session_mode-2");
     return parts.join("-");
   };
   const sampleUser = buildUser(session === "sticky" ? "‹sid›" : null);
 
   const generate = async () => {
-    if (!password) { toast.err("No residential password available from the API"); return; }
+    if (!password) { toast.err(t("psResiGenerator.noPasswordToast")); return; }
     const port = PS_PORT[proto];
     const n = Math.max(1, Math.round(count));
     const entries = Array.from({ length: n }, (_, i) => ({
@@ -142,7 +155,9 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
     setSaving(true);
     try {
       const added = await proxyBulkSave(entries);
-      toast.ok(added > 0 ? `Added ${added} prox${added === 1 ? "y" : "ies"}` : "No new proxies (duplicates)");
+      toast.ok(added > 0
+        ? (added === 1 ? t("psResiGenerator.addedOne", { n: added }) : t("psResiGenerator.addedMany", { n: added }))
+        : t("psResiGenerator.noNewProxies"));
      // onClose();
     } catch (e) { toast.err(String(e)); }
     finally { setSaving(false); }
@@ -152,26 +167,26 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
     <DialogModal
       open
       onClose={onClose}
-      title={`Generate residential proxies — ${plan}`}
+      title={t("psResiGenerator.title", { plan })}
       maxWidthClassName="max-w-[880px]"
-      confirmLabel={saving ? "Generating…" : `Generate ${Math.max(1, Math.round(count))}`}
+      confirmLabel={saving ? t("psResiGenerator.generating") : t("psResiGenerator.generateCount", { n: Math.max(1, Math.round(count)) })}
       onConfirm={generate}
       isLoading={saving}
       isDisabled={saving || !password}
-      cancelLabel="Cancel"
+      cancelLabel={t("psResiGenerator.cancel")}
       onCancel={onClose}
     >
       <div className="flex flex-col gap-3 py-4 w-[450px]">
         <div className="grid grid-cols-2 gap-3">
           <CSSelect
             value={relay}
-            title={"Relay"}
+            title={t("psResiGenerator.relayLabel")}
             onChange={setRelay}
             options={PS_RELAYS.map((r) => ({ value: r, label: r }))}
           />
 
           <label className="flex flex-col gap-1">
-            <span className="text-label-base font-medium text-text-strong-900">Protocol</span>
+            <span className="text-label-base font-medium text-text-strong-900">{t("psResiGenerator.protocolLabel")}</span>
             <SegmentControl
               size="small"
               value={proto}
@@ -183,17 +198,19 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
         <div className="grid grid-cols-2 gap-3">
           <CSSelect
             value={country}
-            title={"Country"}
+            title={t("psResiGenerator.countryLabel")}
             onChange={setCountry}
-            placeholder="Any"
-            options={[{ value: "", label: "Any" }, ...countries.map((c) => ({ value: c.code, label: `${c.name} (${c.code})` }))]}
+            placeholder={t("psResiGenerator.countryAnyPlaceholder")}
+            isSearchable
+            searchPlaceholder={t("psResiGenerator.searchCountries")}
+            options={[{ value: "", label: t("psResiGenerator.countryAnyOption") }, ...countries.map((c) => ({ value: c.code, label: `${c.name} (${c.code})` }))]}
           />
           <label className="flex flex-col gap-1">
-            <span className="text-label-base font-medium text-text-strong-900">Session</span>
+            <span className="text-label-base font-medium text-text-strong-900">{t("psResiGenerator.sessionLabel")}</span>
             <SegmentControl
               size="small"
               value={session}
-              items={SESSION_OPTIONS}
+              items={sessionOptions(t)}
               onChange={(v) => setSession(v as "rotating" | "sticky")}
             />
           </label>
@@ -201,34 +218,38 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
         <div className="grid grid-cols-2 gap-3">
           <CSSelect
             value={region}
-            title={"Region"}
+            title={t("psResiGenerator.regionLabel")}
             onChange={setRegion}
-            placeholder={country ? "Any" : "Pick country first"}
-            options={[{ value: "", label: "Any" }, ...regions.map((r) => ({ value: r.code, label: r.name }))]}
+            placeholder={country ? t("psResiGenerator.regionAnyPlaceholder") : t("psResiGenerator.pickCountryFirst")}
+            isSearchable
+            searchPlaceholder={t("psResiGenerator.searchRegions")}
+            options={[{ value: "", label: t("psResiGenerator.regionAnyOption") }, ...regions.map((r) => ({ value: r.code, label: r.name }))]}
           />
 
           <CSSelect
             value={city}
-            title={"City"}
+            title={t("psResiGenerator.cityLabel")}
             onChange={setCity}
-            placeholder={region ? "Any" : "Pick region first"}
-            options={[{ value: "", label: "Any" }, ...cities.map((c) => ({ value: c.code, label: c.name }))]}
+            placeholder={region ? t("psResiGenerator.cityAnyPlaceholder") : t("psResiGenerator.pickRegionFirst")}
+            isSearchable
+            searchPlaceholder={t("psResiGenerator.searchCities")}
+            options={[{ value: "", label: t("psResiGenerator.cityAnyOption") }, ...cities.map((c) => ({ value: c.code, label: c.name }))]}
           />
           {
             type === "premium" && (
               <CSSelect
-                value={city}
-                title={"Device OS"}
-                onChange={setCity}
-                placeholder={"Select device OS"}
-                options={POF_OPTIONS}
+                value={isp}
+                title={t("psResiGenerator.ispLabel")}
+                onChange={setIsp}
+                placeholder={city ? t("psResiGenerator.anyIspPlaceholder") : t("psResiGenerator.pickCityFirst")}
+                options={[{ value: "", label: t("psResiGenerator.ispAnyOption") }, ...isps.map((x) => ({ value: x.code, label: x.name }))]}
               />
             )
           }
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Name prefix" value={prefix} onChange={setPrefix} />
-          <NumField label={session === "sticky" ? "Count (random sid each)" : "Count"} value={count} onChange={(v) => setCount(Math.max(1, Math.round(v)))} />
+          <Field label={t("psResiGenerator.namePrefixLabel")} value={prefix} onChange={setPrefix} />
+          <NumField label={session === "sticky" ? t("psResiGenerator.countStickyLabel") : t("psResiGenerator.countLabel")} value={count} onChange={(v) => setCount(Math.max(1, Math.round(v)))} />
         </div>
         <div className="flex flex-col gap-3">
           {
@@ -239,7 +260,7 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
                 onClick={() => setShowAdvanced((v) => !v)}
                 className="flex w-fit items-center gap-2 rounded-lg text-label-sm font-medium text-text-soft-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-base"
               >
-                Advanced settings
+                {t("psResiGenerator.advancedSettings")}
                 <ChevronDownIcon
                   aria-hidden="true"
                   className={`size-4 transition-transform duration-200 ${showAdvanced ? "rotate-180" : ""}`}
@@ -247,12 +268,31 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
               </button>
             )
           }
+          {showAdvanced && canPickOs && (
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1">
+                <span className="text-label-base font-medium text-text-strong-900">{t("psResiGenerator.osLabel")}</span>
+                <Tooltip
+                  content={t("psResiGenerator.osHelp")}
+                  side="top"
+                  className="left-20"
+                >
+                  <InfoIcon className="size-4 cursor-help text-text-soft-400" />
+                </Tooltip>
+              </div>
+              <CSSelect
+                value={pof}
+                onChange={(v) => setPof(v as typeof pof)}
+                options={pofOptions(t)}
+              />
+            </div>
+          )}
           {showAdvanced && (
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-1">
-                <span className="text-label-base font-medium text-text-strong-900">Session mode</span>
+                <span className="text-label-base font-medium text-text-strong-900">{t("psResiGenerator.sessionModeLabel")}</span>
                 <Tooltip
-                  content="On Default, the session changes if the device does not respond for more than 5 seconds. On Static, the session does not change and waits for the device to return to the network."
+                  content={t("psResiGenerator.sessionModeHelp")}
                   side="top"
                   className="left-20"
                 >
@@ -262,7 +302,7 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
               <CSSelect
                 value={sessionMode}
                 onChange={(v) => setSessionMode(v as "default" | "static")}
-                options={SESSION_MODE_OPTIONS}
+                options={sessionModeOptions(t)}
               />
             </div>
           )}
@@ -270,7 +310,7 @@ export function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: ()
         <div className="mono mt-1.5 break-all rounded-8 bg-bg-weak-50 px-[11px] py-[9px] text-paragraph-xs text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">
           {relay}:{PS_PORT[proto]}:{sampleUser}:{password ? "••••" : "?"}
         </div>
-        <span className="text-label-sm font-medium text-text-soft-400">Note: new generated proxies will be added to the list on Proxies page.</span>
+        <span className="text-label-sm font-medium text-text-soft-400">{t("psResiGenerator.note")}</span>
         {pwErr && <p className="m-0 text-paragraph-xs text-text-soft-400">{pwErr}</p>}
       </div>
     </DialogModal>

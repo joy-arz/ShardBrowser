@@ -9,6 +9,11 @@ import {
   NavShopIcon,
   NavFingerprintsIcon,
   NavSettingsIcon,
+  NavPatchLogIcon,
+  NavExtensionsIcon,
+  NavBookmarksIcon,
+  NavTrashIcon,
+  NavAutomationIcon,
   CopyIcon,
   DocsIcon,
   ShardLogo,
@@ -19,10 +24,12 @@ import { toast } from "../../shared/model/toast";
 import { withUtm } from "../../shared/lib/utils";
 import type { RtUpdate, Section } from "../../shared/types";
 import { useNav } from "../../shared/model/navigation";
+import { useT } from "../../shared/i18n";
 import { DownloadMcp } from "../../features/DownloadMcp";
 import { ThemeSwitch } from "../../features/ThemeSwitch";
 
 function VersionPill() {
+  const t = useT();
   const [info, setInfo] = useState<RtUpdate | null>(null);
   useEffect(() => {
     invoke<RtUpdate>("launcher_update_check").then(setInfo).catch(() => {});
@@ -44,23 +51,25 @@ function VersionPill() {
       disabled={!clickable}
       title={
         info?.update_available
-          ? `New release ${info.latest} is available — click to open the Releases page.`
+          ? t("sidebar.updateTitle", { v: info.latest ?? "" })
           : info
-            ? `Running ${info.current}${info.latest ? `, GitHub: ${info.latest}` : ""}`
-            : "Checking for updates…"
+            ? info.latest
+              ? t("sidebar.runningWithRemote", { v: info.current, latest: info.latest })
+              : t("sidebar.running", { v: info.current })
+            : t("sidebar.checkingTitle")
       }
     >
       <span className="text-icon-strong-950"><ShardMini /></span>
       <div className="flex min-w-0 flex-col">
-        <div className="text-label-xs">ShardX Launcher v{info?.current ?? "…"}</div>
+        <div className="text-label-xs">{t("sidebar.launcherVersion", { v: info?.current ?? "…" })}</div>
         <div className="text-paragraph-xs text-text-soft-400">
           {info === null
-            ? "checking for updates…"
+            ? t("sidebar.checkingStatus")
             : info.update_available
-              ? `Update available → ${info.latest}`
+              ? t("sidebar.updateStatus", { v: info.latest ?? "" })
               : info.latest
-                ? "up to date"
-                : "offline"}
+                ? t("sidebar.upToDate")
+                : t("sidebar.offline")}
         </div>
       </div>
     </button>
@@ -68,25 +77,35 @@ function VersionPill() {
 }
 
 export function Sidebar() {
+  const t = useT();
   const section = useNav((s) => s.section);
   const setSection = useNav((s) => s.setSection);
 
   const sections: { label: string; items: { id: Section; label: string; svg: ReactNode }[] }[] = [
     {
-      label: "Workspace",
+      label: t("sidebar.groupWorkspace"),
       items: [
-        { id: "browsers", label: "Browsers", svg: <NavBrowsersIcon className="size-[18px]" /> },
-        { id: "proxies", label: "Proxies", svg: <RouteIcon className="size-[18px]" /> },
+        { id: "browsers", label: t("sidebar.navBrowsers"), svg: <NavBrowsersIcon className="size-[18px]" /> },
+        { id: "proxies", label: t("sidebar.navProxies"), svg: <RouteIcon className="size-[18px]" /> },
         { id: "proxyshard", label: "ProxyShard", svg: <NavShopIcon className="size-[18px]" /> },
+        { id: "automation", label: t("sidebar.navAutomation"), svg: <NavAutomationIcon className="size-[18px]" /> },
       ],
     },
     {
-      label: "Library",
-      items: [{ id: "fingerprints", label: "Fingerprints", svg: <NavFingerprintsIcon className="size-[18px]" /> }],
+      label: t("sidebar.groupLibrary"),
+      items: [
+        { id: "fingerprints", label: t("sidebar.navFingerprints"), svg: <NavFingerprintsIcon className="size-[18px]" /> },
+        { id: "extensions", label: t("sidebar.navExtensions"), svg: <NavExtensionsIcon className="size-[18px]" /> },
+        { id: "bookmarks", label: t("sidebar.navBookmarks"), svg: <NavBookmarksIcon className="size-[18px]" /> },
+      ],
     },
     {
-      label: "System",
-      items: [{ id: "settings", label: "Settings", svg: <NavSettingsIcon className="size-[18px]" /> }],
+      label: t("sidebar.groupSystem"),
+      items: [
+        { id: "trash", label: t("sidebar.navTrash"), svg: <NavTrashIcon className="size-[18px]" /> },
+        { id: "patchlog", label: t("sidebar.navPatchLog"), svg: <NavPatchLogIcon className="size-[18px]" /> },
+        { id: "settings", label: t("sidebar.navSettings"), svg: <NavSettingsIcon className="size-[18px]" /> },
+      ],
     },
   ];
 
@@ -136,20 +155,20 @@ export function Sidebar() {
       <div className="mt-auto border-t border-stroke-soft-200 pt-2">
         <div className="mb-2.5 flex flex-col gap-[7px] rounded-xl bg-bg-weak-50 p-2.5 ring-1 ring-inset ring-stroke-soft-200">
           <div className="flex items-center justify-between">
-            <span className="text-subheading-2xs text-text-soft-400">Automation API</span>
-            {autoUrl && <Badge color="success" variant="filled" size="small" dot>on</Badge>}
+            <span className="text-subheading-2xs text-text-soft-400">{t("sidebar.apiTitle")}</span>
+            {autoUrl && <Badge color="success" variant="filled" size="small" dot>{t("sidebar.apiOn")}</Badge>}
           </div>
           {autoUrl ? (
             <button
               className="flex w-full cursor-pointer items-center justify-between gap-1.5 rounded-lg bg-bg-white-0 px-2 py-[5px] text-paragraph-xs text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 transition-colors hover:text-text-strong-950 hover:ring-stroke-sub-300"
-              title="Copy API base URL"
-              onClick={() => { clip.write(autoUrl); toast.ok("Copied API URL"); }}
+              title={t("sidebar.copyApiUrl")}
+              onClick={() => { clip.write(autoUrl); toast.ok(t("sidebar.apiUrlCopied")); }}
             >
               <span className="mono truncate">{autoUrl.replace(/^https?:\/\//, "")}</span>
               <CopyIcon className="size-3.5 shrink-0" />
             </button>
           ) : (
-            <div className="text-paragraph-xs text-text-soft-400">API off — enable in Settings</div>
+            <div className="text-paragraph-xs text-text-soft-400">{t("sidebar.apiOff")}</div>
           )}
           <DownloadMcp />
           <Button
@@ -161,9 +180,9 @@ export function Sidebar() {
             onClick={() => {
               openUrl(withUtm("https://docs.proxyshard.com/eng/shardx-launcher-api/binding-and-lifecycle?fallback=true")).catch(() => {});
             }}
-            title="Open the full Automation API reference on docs.proxyshard.com"
+            title={t("sidebar.docsTitle")}
           >
-            Documentation
+            {t("sidebar.docs")}
           </Button>
         </div>
         <ThemeSwitch />

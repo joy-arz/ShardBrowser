@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, DialogModal, Input } from "@proxyshard/shardx-ui-kit";
 import { FolderIcon } from "../../../shared/icons";
+import { useT } from "../../../shared/i18n";
 
 /// Folder picker/creator modal (replaces native prompt). mode: "create" | "move".
 export function FolderModal({
@@ -12,6 +13,7 @@ export function FolderModal({
   onCreate: (name: string) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [name, setName] = useState("");
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => { ref.current?.focus(); }, []);
@@ -24,17 +26,17 @@ export function FolderModal({
       open
       onClose={onClose}
       icon={<FolderIcon className="size-5" />}
-      title={mode === "move" ? "Move to folder" : "New folder"}
-      confirmLabel={showList ? "Create & move" : "Create"}
+      title={mode === "move" ? t("folderModal.moveTitle") : t("folderModal.createTitle")}
+      confirmLabel={showList ? t("folderModal.createAndMove") : t("folderModal.create")}
       onConfirm={create}
       isDisabled={!trimmed || dup}
-      cancelLabel="Cancel"
+      cancelLabel={t("folderModal.cancel")}
       onCancel={onClose}
     >
       <div className="flex flex-col gap-3 py-4">
         {showList && (
           <>
-            <span className="text-label-xs text-text-sub-600">Existing folders</span>
+            <span className="text-label-xs text-text-sub-600">{t("folderModal.existingFolders")}</span>
             <div className="flex max-h-[220px] flex-col gap-1 overflow-y-auto">
               {existing.map((f) => (
                 <Button
@@ -51,17 +53,17 @@ export function FolderModal({
               ))}
             </div>
             <div className="my-0.5 flex items-center gap-2.5 text-paragraph-xs text-text-soft-400 [&::before]:h-px [&::before]:flex-1 [&::before]:bg-stroke-soft-200 [&::before]:content-[''] [&::after]:h-px [&::after]:flex-1 [&::after]:bg-stroke-soft-200 [&::after]:content-['']">
-            <span>or create new</span>
+            <span>{t("folderModal.orCreateNew")}</span>
             </div>
           </>
         )}
         <Input
           ref={ref}
-          label={showList ? "New folder name" : "Folder name"}
+          label={showList ? t("folderModal.newFolderNameLabel") : t("folderModal.folderNameLabel")}
           inputSize="small"
           value={name}
-          placeholder="e.g. Shops, Socials, QA…"
-          error={dup ? `Folder "${trimmed}" already exists.` : undefined}
+          placeholder={t("folderModal.namePlaceholder")}
+          error={dup ? t("folderModal.duplicateError", { name: trimmed }) : undefined}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") create();

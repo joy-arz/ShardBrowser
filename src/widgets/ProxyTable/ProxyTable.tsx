@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Checkbox, Pagination } from "@proxyshard/shardx-ui-kit";
 import { RouteIcon } from "../../shared/icons";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
+import { useT } from "../../shared/i18n";
 import { useProxy, useFilteredProxies, useProfileCountByProxy } from "../../entities/proxy";
 import { NewProxyButton } from "../../features/manage-proxies";
 import { ProxyRow } from "./ProxyRow";
@@ -9,6 +10,7 @@ import { ProxyRow } from "./ProxyRow";
 const PROXY_PAGE_SIZE = 20;
 
 export function ProxyTable() {
+  const t = useT();
   const totalProxies = useProxy((s) => s.proxies.length);
   const selectProxy = useProxy((s) => s.selectProxy);
   const proxySel = useProxy((s) => s.proxySel);
@@ -39,18 +41,18 @@ export function ProxyTable() {
         <div className="p-cols w-full justify-between border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
           <div>
             <Checkbox
-              title="Select all on this page"
+              title={t("proxyTable.selectAllOnPage")}
               checked={allPageSelected}
               indeterminate={anyPageSelected && !allPageSelected}
               onChange={(e) => selectProxy(e.target.checked, pagedProxies)}
             />
           </div>
-          <div>Name</div>
-          <div>Type</div>
-          <div>Host:Port</div>
-          <div>Country</div>
-          <div>Profiles</div>
-          <div>Test result</div>
+          <div>{t("proxyTable.colName")}</div>
+          <div>{t("proxyTable.colType")}</div>
+          <div>{t("proxyTable.colHostPort")}</div>
+          <div>{t("proxyTable.colCountry")}</div>
+          <div>{t("proxyTable.colProfiles")}</div>
+          <div>{t("proxyTable.colTestResult")}</div>
           <div></div>
         </div>
         {pagedProxies.map((p) => (
@@ -66,9 +68,9 @@ export function ProxyTable() {
             <div className="grid size-14 place-items-center rounded-[14px] bg-primary-alpha-10 text-primary-base ring-1 ring-inset ring-primary-alpha-24">
               <RouteIcon className="size-6" />
             </div>
-            <h3 className="m-0 text-label-sm text-text-strong-950">No proxies yet</h3>
+            <h3 className="m-0 text-label-sm text-text-strong-950">{t("proxyTable.emptyTitle")}</h3>
             <p className="m-0 max-w-[420px] text-paragraph-sm text-text-sub-600">
-              Add a SOCKS5/HTTP(S) endpoint so profiles can route through it.
+              {t("proxyTable.emptyHint")}
             </p>
             <div className="mt-2 flex gap-2">
               <NewProxyButton />
@@ -83,7 +85,7 @@ export function ProxyTable() {
             totalPages={proxyPageCount}
             asLinks={false}
             onPageChange={setProxyPage}
-            infoLabel={(p, total) => `Page ${p} of ${total} · ${totalProxies} proxies`}
+            infoLabel={(p, total) => t("proxyTable.pageInfo", { page: p, total, count: totalProxies })}
           />
         </div>
       )}

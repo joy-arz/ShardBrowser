@@ -32,6 +32,8 @@ mod auto_resolve;
 mod browser;
 #[cfg(feature = "control")]
 mod control;
+#[cfg(feature = "control")]
+pub mod motion;
 mod geo;
 mod host;
 mod profile;
@@ -54,6 +56,8 @@ pub use browser::{Browser, BrowserSession, LaunchOptions, WebRtcMode};
 pub use chromiumoxide;
 #[cfg(feature = "control")]
 pub use control::Session;
+#[cfg(feature = "control")]
+pub use motion::Motion;
 pub use geo::{geo_check_via, GeoInfo};
 pub use host::{host_logical_cores, host_ram_bucket_gb, host_ram_gb, host_screen_size, Size};
 pub use profile::{apply_engine_version, user_data_dir, FingerprintLibrary, Profile};
@@ -152,6 +156,21 @@ impl ShardX {
     /// hardware + platform_version under a fresh unique id, and frozen to disk.
     /// Pass the returned profile straight to `launch` / `session`.
     pub async fn create_profile(&self, template: Option<&str>) -> Result<Profile> {
+        self.create_profile_with(template, None).await
+    }
+
+    /// `create_profile` plus the claimed display refresh rate in Hz.
+    ///
+    /// No web API reports the refresh rate; a page measures it by timing
+    /// requestAnimationFrame. Leaving it out is not neutral — the engine then
+    /// claims 60, which is what most machines report, rather than the host's
+    /// own screen. Frames can only be slowed, so a rate above the host's panel
+    /// runs at the panel's.
+    pub async fn create_profile_with(
+        &self,
+        template: Option<&str>,
+        refresh_rate: Option<u32>,
+    ) -> Result<Profile> {
         self.runtime.install(false).await?;
         let mut config = match template {
             Some(id) => self.library.load(id)?.config,
@@ -161,6 +180,23 @@ impl ShardX {
         // Seed hardware by the new id so the pick is stable across reopens.
         randomize_hardware(&mut config, Some(&id));
         randomize_platform_version(&mut config);
+        if let Some(hz) = refresh_rate {
+            if !(24..=480).contains(&hz) {
+                anyhow::bail!("refresh_rate must be 24..480, got {hz}");
+            }
+            let obj = config
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("fingerprint config is not an object"))?;
+            let screen = obj
+                .entry("screen")
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            match screen.as_object_mut() {
+                Some(o) => {
+                    o.insert("refresh_rate".into(), serde_json::json!(hz));
+                }
+                None => anyhow::bail!("`screen` is not an object"),
+            }
+        }
         let profile = Profile::new(config, Some(id));
         self.save_profile(&profile)?;
         Ok(profile)

@@ -4,7 +4,7 @@ Self-contained Node/TypeScript SDK for the **ShardX anti-detect
 browser** by the [ProxyShard](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher) team.
 
 Does **not** depend on the desktop launcher. On first use it downloads
-the patched Chromium 152 engine, Widevine CDM, and the 170-profile
+the patched Chromium 152 engine, Widevine CDM, and the 220-profile
 fingerprint library from our CDN into a local cache, then launches
 isolated browser sessions on demand.
 
@@ -149,6 +149,48 @@ sdk.deleteProfile("<id>");
 Saved profiles never touch the bundled S3 library: templates stay read-only in
 `<cache>/fingerprints/*.json`, saved profiles live in `<cache>/profiles/<id>/`
 (holding `profile.json` + the browser's user-data-dir).
+
+## Human input and finger gestures
+
+`Motion` is the engine's own input domain: pointer trajectories that obey
+Fitts's law, key-by-key typing with log-normal gaps, and the gestures a cursor
+cannot make. It runs inside the browser process — nothing is injected into the
+page — and it does not appear in `/json/protocol`, so a page cannot discover it.
+
+```ts
+import { ShardX, Motion } from "@proxyshard/shardx";
+
+const { browser, session } = await sdk.session(profile);
+const motion = await Motion.attach(browser);
+
+// desktop profile
+await motion.createPointer(20, 20);
+await motion.glideTo(640, 360, 220);   // 220 = the field's real width
+await motion.tap();
+await motion.enterText("hello there");
+await motion.destroyPointer();
+
+// phone profile
+await motion.touchSwipe(200, 600, 200, 200, true);   // scroll and fling
+await motion.touchLongPress(200, 300);               // context menu
+await motion.pinch(200, 400, 2);                     // zoom in
+const o = await motion.setOrientation(90);
+// o → { angle: 90, type: "landscape-primary", screenWidth: 844, ... }
+```
+
+A profile that claims a touchscreen has no cursor, and the core enforces it
+both ways: the pointer commands are refused on such a profile, and the finger
+commands are refused on every other. There is no `touchScroll` and no fling
+command — gestures are built in the browser out of the touch stream, so a real
+swipe produces the scroll and the fling with the velocity the browser's own
+tracker fitted. `touchDrag` differs from `touchSwipe` in the wait before the
+travel: that wait is when a page's drag-and-drop starts, and a stroke that
+begins earlier is a scroll.
+
+`setOrientation` is physical and takes time — the sensors move first and the
+picture commits at the end, the order a handset produces. It returns once the
+new angle has reached the page, so `screen.width` read straight after is
+already the turned one.
 
 ## Anti-fingerprint noise
 
@@ -298,7 +340,7 @@ with `cdpUrl`, `geo`, `proxyUdpMs`, `quicEnabled`, `webrtcMode`,
 ~/.cache/shardx-sdk/                         (linux)
 ├── manifest.json             ← etag cache
 ├── ShardX-Mac-arm64/         ← extracted engine
-├── fingerprints/             ← 170 bundled .json templates (read-only)
+├── fingerprints/             ← 220 bundled .json templates (read-only)
 └── profiles/<id>/            ← saved profile (createProfile) + its state
     ├── profile.json          ← the frozen fingerprint config
     └── …                     ← user-data-dir: cookies, IndexedDB, cache

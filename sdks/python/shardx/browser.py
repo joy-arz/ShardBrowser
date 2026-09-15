@@ -110,6 +110,7 @@ class Browser:
         cdp: bool = False,
         headless: bool = False,
         extra_args: Optional[list[str]] = None,
+        android_media: bool = False,
         env: Optional[dict[str, str]] = None,
         webrtc: str = "auto",                  # "auto" | "block" | "tcp_only"
         webrtc_public_ip: Optional[str] = None,
@@ -157,7 +158,7 @@ class Browser:
         )
         apply_noise_seeds(profile.config, profile.id)
         fp_file = udd / "fingerprint.json"
-        fp_file.write_text(json.dumps(profile.config))
+        fp_file.write_text(json.dumps(profile.config), encoding="utf-8")
 
         argv: list[str] = [
             str(self.runtime.binary_path),
@@ -165,8 +166,12 @@ class Browser:
             f"--user-data-dir={udd}",
             "--no-first-run",
         ]
-        if not profile.has_webgpu:
+        # A Linux profile keeps navigator.gpu and answers the adapter request
+        # with nothing, as Chrome on Linux does; the switch removes the object.
+        if not profile.has_webgpu and not profile.claims_linux_desktop:
             argv.append("--disable-features=WebGPU")
+        if android_media and profile.claims_mobile:
+            argv.append("--shardx-android-media")
         if not headless and not cdp:
             argv += ["--restore-last-session", "--hide-crash-restore-bubble"]
         # Engine-side real-screen switch only fires on use_host (where the
@@ -233,7 +238,7 @@ def _read_cdp_endpoint(udd: Path, timeout: float) -> Optional[str]:
     while time.monotonic() < deadline:
         if marker.exists():
             try:
-                port = int(marker.read_text().splitlines()[0].strip())
+                port = int(marker.read_text(encoding="utf-8").splitlines()[0].strip())
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2.0) as r:
                     data = json.loads(r.read())
                     return data.get("webSocketDebuggerUrl")

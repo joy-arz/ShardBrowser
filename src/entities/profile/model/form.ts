@@ -5,9 +5,17 @@ import { deriveAcceptLanguage, deriveLanguagesArray } from "../../../shared/lib/
 
 export const defaultForm = (): ProfileForm => ({
   id: "",
+  rev: 0,
   name: "",
   notes: "",
   proxy_id: null,
+  color: "",
+  extensions: [],
+  android_media: false,
+  refresh_rate: 60,
+  screen_w: 0,
+  screen_h: 0,
+  cookies_file: "",
 
   // Empty until snapped to gpusForOs[0] by useEffect.
   gpu_preset_id: "",
@@ -46,13 +54,20 @@ export function fromStored(stored: any): ProfileForm {
   const f = defaultForm();
   if (!stored) return f;
   f.id = stored?._meta?.id ?? "";
+  f.rev = stored?._meta?.rev ?? 0;
   f.proxy_id = stored?._meta?.proxy_id ?? null;
   f.name = stored?.name ?? "";
   f.notes = stored?.notes ?? "";
+  f.color = stored?._meta?.color ?? "";
+  f.extensions = Array.isArray(stored?._meta?.extensions) ? stored._meta.extensions : [];
+  f.android_media = stored?._meta?.android_media === true;
   // Empty for legacy profiles; snapped by useEffect.
   f.gpu_preset_id = stored?._meta?.gpu_preset_id ?? "";
   f.user_agent = stored?.navigator?.user_agent ?? f.user_agent;
   f.hardware_concurrency = stored?.navigator?.hardware_concurrency ?? 8;
+  f.refresh_rate = stored?.screen?.refresh_rate ?? 60;
+  f.screen_w = stored?.screen?.width ?? 0;
+  f.screen_h = stored?.screen?.height ?? 0;
   f.device_memory = stored?.navigator?.device_memory ?? 16;
   f.timezone = stored?.timezone ?? AUTO_TZ;
   f.language = stored?.navigator?.language ?? AUTO_LANG;
@@ -92,9 +107,14 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
 
   base._meta = {
     id: f.id,
+    rev: f.rev,
     proxy_id: f.proxy_id,
     last_launched_at: null,
     gpu_preset_id: f.gpu_preset_id,
+    // Absent, not empty: that is what "derive it" means on disk.
+    ...(f.color ? { color: f.color } : {}),
+    extensions: f.extensions,
+    ...(f.android_media ? { android_media: true } : {}),
   };
   base.name = f.name || "untitled";
   base.notes = f.notes;
@@ -119,6 +139,31 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
     base.client_hints = {
       ...(base.client_hints || {}),
       platform_version: f.platform_version,
+    };
+  }
+
+  // The rest of the screen block comes from the fingerprint template; only the
+  // refresh rate is the operator's to set, because it is the one part of it a
+  // page reads by timing rather than by asking.
+  base.screen = {
+    ...(base.screen || {}),
+    refresh_rate: f.refresh_rate,
+  };
+
+  // A chosen resolution replaces the template's. avail_* keeps the template's
+  // own insets — the menubar or taskbar strip — instead of being invented,
+  // because a screen whose avail equals its full height is a screen with no
+  // system chrome, which no ordinary desktop has.
+  if (f.screen_w > 0 && f.screen_h > 0) {
+    const tpl = (base.screen || {}) as Record<string, number>;
+    const insetW = Math.max((tpl.width ?? f.screen_w) - (tpl.avail_width ?? tpl.width ?? f.screen_w), 0);
+    const insetH = Math.max((tpl.height ?? f.screen_h) - (tpl.avail_height ?? tpl.height ?? f.screen_h), 0);
+    base.screen = {
+      ...base.screen,
+      width: f.screen_w,
+      height: f.screen_h,
+      avail_width: Math.max(f.screen_w - insetW, 1),
+      avail_height: Math.max(f.screen_h - insetH, 1),
     };
   }
 
@@ -149,4 +194,10 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
   base.blocked_ports = [...f.blocked_ports].sort((a, b) => a - b);
 
   return base;
+}
+
+/** Whether a form describes a phone. By the user agent: the OS control offers no
+ *  phone, and navigator.platform on Chrome for Android says "Linux armv8l". */
+export function claimsMobile(f: { user_agent?: string }): boolean {
+  return (f.user_agent || "").toLowerCase().includes("android");
 }
