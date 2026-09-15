@@ -100,6 +100,10 @@ tags:
   - name: Profiles
   - name: Folders
   - name: Proxies
+  - name: Extensions
+  - name: Bookmarks
+  - name: Trash
+  - name: Automation
 
 paths:
   /health:
@@ -250,7 +254,7 @@ paths:
                     type: boolean
                     description: Whether an inline proxy string was attached.
         "400":
-          description: Unparseable proxy string.
+          description: Unparseable proxy string, or an unknown noise vector.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -286,12 +290,20 @@ paths:
     delete:
       tags: [Profiles]
       summary: Delete a profile
-      description: Removes the profile config and its user-data-dir.
+      description: |
+        Moves the profile to the trash, where it stays restorable for 7 days
+        before it is swept. What is archived is the account — cookies, logins,
+        web data, preferences, Local Storage, IndexedDB — not the caches, so
+        the archive is a fraction of the user-data dir. The original config and
+        user-data dir are removed once the archive is written.
+
+        Temporary profiles are torn down by the process tracker when their
+        browser closes and never reach the trash.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       responses:
         "200":
-          description: Deleted.
+          description: Moved to the trash.
           content:
             application/json:
               schema:
@@ -299,6 +311,10 @@ paths:
                 properties:
                   deleted: { type: boolean, example: true }
                   id: { type: string, format: uuid }
+                  trashed:
+                    type: boolean
+                    example: true
+                    description: Restorable from the launcher's Trash for 7 days.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "500":
           description: Deletion failed.
@@ -348,9 +364,10 @@ paths:
         enabled, resolves any `auto` timezone/locale/geo from the bound
         proxy, and returns the CDP endpoint once Chrome has written its
         DevToolsActivePort. CDP is enabled **only** on API launches (UI
-        launches stay debugging-free for anti-detect). `cdp` is `null` if
-        the endpoint couldn't be read within the timeout. Works for both
-        regular and temporary profiles.
+        launches stay debugging-free for anti-detect). The call waits up to
+        30 seconds for the endpoint; if it still has none, `cdp` is `null`
+        and `cdp_error` says what happened and where to read the port
+        yourself. Works for both regular and temporary profiles.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       requestBody:
@@ -379,6 +396,11 @@ paths:
                   cdp:
                     nullable: true
                     allOf: [{ $ref: "#/components/schemas/CdpInfo" }]
+                  cdp_error:
+                    type: string
+                    nullable: true
+                    description: >
+                      Why `cdp` is null, when it is. Absent otherwise.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "500":
           description: Binary not configured / spawn failed.
@@ -670,6 +692,611 @@ paths:
                   id: { type: string }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /extensions:
+    get:
+      tags: [Extensions]
+      summary: List the extension library
+      description: |
+        Extensions available to profiles. The `id` of each is what
+        `POST /profiles` and `PATCH /profiles/{id}` take in `extensions`.
+
+        Icons are omitted here: a data URL runs to hundreds of kilobytes and a
+        listing of thirty would be mostly base64. `POST /extensions` returns
+        the icon for the one it just added.
+      responses:
+        "200":
+          description: The library.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Extension" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Extensions]
+      summary: Add an extension
+      description: |
+        Give either `url` or `path`.
+
+        `url` takes a Chrome Web Store page, a bare 32-character extension id,
+        or a direct link to a `.crx` / `.zip`; the launcher resolves the store
+        page to the download itself. `path` takes a local `.crx`, `.zip`, or an
+        unpacked folder on the machine running the launcher.
+
+        Name, version, description and icon come out of the extension's own
+        `manifest.json` — including `__MSG_*__` placeholders, resolved against
+        its default locale.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddExtensionRequest" }
+      responses:
+        "200":
+          description: Added; `icon` is populated on this response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Extension" }
+        "400":
+          description: Neither `url` nor `path` given, the link is not an extension, or the store has no such id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /extensions/{id}:
+    delete:
+      tags: [Extensions]
+      summary: Remove an extension
+      description: |
+        Profiles hold ids, not copies, so any profile naming this extension
+        stops loading it from its next launch. Their stored list is left as it
+        is — re-adding the extension does not restore the binding.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+                  id: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /bookmarks:
+    get:
+      tags: [Bookmarks]
+      summary: List folder bookmarks
+      responses:
+        "200":
+          description: Every bookmark, across folders.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Bookmark" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Bookmarks]
+      summary: Add or update a bookmark
+      description: |
+        With `id` it updates that bookmark; without, it creates one.
+
+        A bookmark bound to a folder appears in the bookmarks bar of every
+        profile in that folder, inside a folder called **ShardX**; `folder: ""`
+        means every profile. Only that folder is managed, so bookmarks the
+        operator saved inside a profile are untouched.
+
+        Applied when a profile next launches — the file is written just before
+        the browser reads it, so a running profile does not see the change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BookmarkRequest" }
+      responses:
+        "200":
+          description: The saved bookmark.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Bookmark" }
+        "400":
+          description: No URL given.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /bookmarks/{id}:
+    delete:
+      tags: [Bookmarks]
+      summary: Delete a bookmark
+      description: It leaves its profiles on their next launch.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+                  id: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /trash:
+    get:
+      tags: [Trash]
+      summary: List deleted profiles
+      description: |
+        Profiles `DELETE /profiles/{id}` archived, newest first, each with the
+        instant it stops being restorable. The sweep runs at launcher startup.
+      responses:
+        "200":
+          description: The trash.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TrashEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /trash/{id}/restore:
+    post:
+      tags: [Trash]
+      summary: Restore a deleted profile
+      description: |
+        Puts the profile back under its **own id**, so a script, a bookmark
+        folder or a proxy binding that referenced it still points at it. The
+        archive is removed once the profile is back.
+
+        What returns is the account — cookies, logins, web data, preferences,
+        history, bookmarks, Local Storage, IndexedDB. Caches were never
+        archived and are rebuilt on the next launch.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The restored profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileMeta" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Nothing in the trash under that id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /trash/{id}:
+    delete:
+      tags: [Trash]
+      summary: Delete a trashed profile for good
+      description: Irreversible — the archive is the only remaining copy.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Purged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  purged: { type: boolean, example: true }
+                  id: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /automation/projects:
+    get:
+      tags: [Automation]
+      summary: List automation projects
+      description: |
+        Every project saved in the launcher, with its blocks and run settings.
+        These are the same projects the desktop **Automation** section edits.
+      responses:
+        "200":
+          description: The projects.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AutomationProject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Automation]
+      summary: Create an empty project
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: "Empty gives \"Untitled\"." }
+      responses:
+        "200":
+          description: The new project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationProject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /automation/projects/{id}:
+    get:
+      tags: [Automation]
+      summary: Get one project
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationProject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [Automation]
+      summary: Replace a project
+      description: |
+        Whole-project replace: send it back the way `GET` returned it. The id
+        in the path wins over the one in the body, and an id that does not
+        exist is a `404` rather than a silent create — use `POST
+        /automation/projects` to make one.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutomationProject" }
+      responses:
+        "200":
+          description: The saved project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationProject" }
+        "400":
+          description: The body is not a project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [Automation]
+      summary: Delete a project
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+                  id: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/projects/{id}/duplicate:
+    post:
+      tags: [Automation]
+      summary: Copy a project
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The copy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationProject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/projects/{id}/export:
+    get:
+      tags: [Automation]
+      summary: Export a project as a bundle
+      description: |
+        Parameters the project marked secret are emptied on the way out, so a
+        bundle can be handed on without taking a password with it. The import
+        side asks for them again.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The bundle.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationBundle" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/import:
+    post:
+      tags: [Automation]
+      summary: Import a project bundle
+      description: The bundle arrives as a new project with a new id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutomationBundle" }
+      responses:
+        "200":
+          description: The imported project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationProject" }
+        "400":
+          description: Not a bundle, or a version this build does not read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /automation/projects/{id}/run:
+    post:
+      tags: [Automation]
+      summary: Start a project
+      description: |
+        Answers as soon as the run is under way — the browsers it needs are
+        started by the project's own blocks. Poll `/status` for progress.
+
+        A project already running is a `400`; so is one with no enabled steps.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Started.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: { type: string, format: uuid }
+                  running: { type: boolean, example: true }
+        "400":
+          description: Already running, or nothing to run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/projects/{id}/stop:
+    post:
+      tags: [Automation]
+      summary: Stop a project
+      description: |
+        Asks the run to stop. Each browser finishes the step it is in and then
+        closes, so the run does not disappear the instant this answers — watch
+        `running` on `/status`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Stopping.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: { type: string, format: uuid }
+                  stopping: { type: boolean, example: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/projects/{id}/status:
+    get:
+      tags: [Automation]
+      summary: How a run is going
+      description: |
+        `null` when the project is not running and has not run since the
+        launcher started. The log is the tail the fleet window shows; the whole
+        thing is on disk under `automation-runs/`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The run state, or null.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AutomationRun"
+                  - type: "null"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/runs:
+    get:
+      tags: [Automation]
+      summary: Every run going right now
+      responses:
+        "200":
+          description: The runs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AutomationRun" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/modules:
+    get:
+      tags: [Automation]
+      summary: List installed modules
+      description: |
+        Modules are WebAssembly an operator wrote themselves; each contributes
+        blocks under the kind `module:<module id>:<block>`. A module never
+        touches the page — it answers with actions the runner performs.
+      responses:
+        "200":
+          description: The modules.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AutomationModule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      tags: [Automation]
+      summary: Install a module
+      description: |
+        `path` is a `.wasm` file **on this machine** — the API is local, and a
+        module is native code the operator built themselves.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string, example: "/home/me/module.wasm" }
+      responses:
+        "200":
+          description: The installed module.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationModule" }
+        "400":
+          description: No path, or the file is not a module this build can load.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /automation/modules/{id}:
+    delete:
+      tags: [Automation]
+      summary: Remove a module
+      description: Projects using its blocks stop working; nothing rewrites them.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+                  id: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such module.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501":
+          description: This launcher was built without automation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -737,6 +1364,14 @@ components:
             color_depth: { type: integer, example: 24 }
             device_pixel_ratio: { type: number, example: 2 }
             color_gamut: { type: string, enum: ["", srgb, p3, rec2020] }
+            refresh_rate:
+              type: integer
+              minimum: 24
+              maximum: 480
+              example: 60
+              description: >
+                How often the claimed display refreshes. Absent means 60.
+                See the refresh_rate field on the create/edit requests.
         client_hints:
           type: object
           description: Sec-CH-UA family (browser.vision calls this `hints`).
@@ -830,6 +1465,33 @@ components:
         folder:
           type: string
           description: Folder tag (ignored on /folders/{folder}/profiles, which wins).
+        color:
+          type: string
+          description: |
+            Accent for the profile's window icon and for the pill carrying its
+            name in the omnibox. Omit it and the icon derives a colour from the
+            name while the pill keeps the browser's own toolbar colour.
+          example: "#2FCB80"
+        extensions:
+          type: array
+          items: { type: string }
+          description: |
+            Extension-library ids (`GET /extensions`), loaded at launch. An id
+            the library does not hold is a 400 rather than a profile that
+            silently starts without it.
+        refresh_rate:
+          type: integer
+          minimum: 24
+          maximum: 480
+          example: 60
+          description: |
+            Claimed display refresh rate, written into `screen.refresh_rate`.
+            No web API reports it; a page measures it by timing
+            requestAnimationFrame, which is why leaving it out is not neutral —
+            absent means 60, what most machines report, rather than whatever
+            the host's own screen does. Frames can only be slowed, so the
+            effective rate is the closest whole division of the host's panel at
+            or under this.
         fingerprint:
           allOf: [{ $ref: "#/components/schemas/Fingerprint" }]
           description: Stored verbatim. Get one from /fingerprint/new and edit as needed.
@@ -845,6 +1507,26 @@ components:
         proxy:
           type: string
           description: Proxy string — stored (deduped) + full-tested, then bound.
+        color:
+          type: string
+          description: '`#rrggbb`; "" goes back to the name-derived colour.'
+        extensions:
+          type: array
+          items: { type: string }
+          description: Replaces the whole list; `[]` loads none.
+        refresh_rate:
+          type: integer
+          minimum: 24
+          maximum: 480
+          example: 60
+          description: |
+            Claimed display refresh rate, applied AFTER `fingerprint` and written into `screen.refresh_rate`.
+            No web API reports it; a page measures it by timing
+            requestAnimationFrame, which is why leaving it out is not neutral —
+            absent means 60, what most machines report, rather than whatever
+            the host's own screen does. Frames can only be slowed, so the
+            effective rate is the closest whole division of the host's panel at
+            or under this.
         fingerprint:
           allOf: [{ $ref: "#/components/schemas/Fingerprint" }]
           description: When present, REPLACES the stored fingerprint verbatim.
@@ -864,6 +1546,130 @@ components:
           description: Inline proxy string (not saved to the store).
         name: { type: string }
         folder: { type: string }
+        refresh_rate:
+          type: integer
+          minimum: 24
+          maximum: 480
+          example: 60
+          description: |
+            Claimed display refresh rate, written into `screen.refresh_rate`.
+            No web API reports it; a page measures it by timing
+            requestAnimationFrame, which is why leaving it out is not neutral —
+            absent means 60, what most machines report, rather than whatever
+            the host's own screen does. Frames can only be slowed, so the
+            effective rate is the closest whole division of the host's panel at
+            or under this.
+        noise:
+          type: object
+          description: |
+            Per-vector fingerprint noise. Vectors left out keep their default
+            (off). Two forms, mixable in one request:
+
+              * shorthand — `{"canvas": true, "webgl": true}`; turning `webgl`
+                or `client_rects` on this way also gives it the strength the UI
+                uses, since a vector enabled at zero strength does nothing
+              * full block — `{"canvas": {"enabled": true, "seed": 42}}`, the
+                same shape `GET /profiles/{id}` hands back
+
+            Fields are merged into the vector rather than replacing it, so
+            `{"webgl": {"intensity": 0.001}}` leaves `enabled` alone. A `seed`
+            of `0` (or omitted) still means "derive a stable one from the
+            profile id", which is what keeps two temporary profiles from
+            sharing a fingerprint.
+          additionalProperties:
+            oneOf:
+              - type: boolean
+              - type: object
+                properties:
+                  enabled: { type: boolean }
+                  seed: { type: integer, format: int64 }
+                  intensity: { type: number, description: "`webgl` only." }
+                  max_offset: { type: number, description: "`client_rects` only." }
+          properties:
+            canvas: {}
+            webgl: {}
+            audio: {}
+            client_rects: {}
+            sensors: {}
+            fonts: {}
+          example:
+            canvas: true
+            webgl: { enabled: true, intensity: 0.0005 }
+            fonts: true
+
+    Extension:
+      type: object
+      properties:
+        id: { type: string, description: Pass this in a profile's `extensions`. }
+        name: { type: string }
+        version: { type: string }
+        description: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        added_at: { type: string, description: "`@<unix_secs>`." }
+        icon:
+          type: string
+          nullable: true
+          description: |
+            Largest icon the manifest declares, as a `data:` URL. Null on the
+            listing endpoint and on extensions that ship none.
+
+    AddExtensionRequest:
+      type: object
+      description: Exactly one of `url` or `path`.
+      properties:
+        url:
+          type: string
+          description: |
+            A Chrome Web Store page, a bare 32-character extension id, or a
+            direct link to a `.crx` / `.zip`.
+          example: https://chromewebstore.google.com/detail/rabby-wallet/acmacodkjbdgmoleebolmdjonilkdbch
+        path:
+          type: string
+          description: A local `.crx`, `.zip` or unpacked folder on the launcher's machine.
+
+    Bookmark:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        url: { type: string }
+        folder:
+          type: string
+          description: Launcher folder; empty means every profile.
+
+    BookmarkRequest:
+      type: object
+      required: [url]
+      properties:
+        id:
+          type: string
+          description: Present updates that bookmark; absent creates one.
+        url:
+          type: string
+          description: A bare host is fine — `https://` is added.
+          example: facebook.com/ads/manager
+        title:
+          type: string
+          description: Blank uses the address itself.
+        folder:
+          type: string
+          description: Empty (or absent) means every profile.
+
+    TrashEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        folder: { type: string }
+        deleted_at: { type: integer, format: int64, description: Unix seconds. }
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix seconds; the startup sweep removes anything past it.
+        size_bytes:
+          type: integer
+          format: int64
+          description: The archive, which holds the account and not the caches.
 
     ProfileMeta:
       type: object
@@ -877,6 +1683,16 @@ components:
         created_at: { type: string, nullable: true }
         pinned: { type: boolean }
         folder: { type: string }
+        color:
+          type: string
+          nullable: true
+          description: |
+            Icon accent as `#rrggbb`; `null` means it is derived from the name,
+            which is what the browser does when nothing is chosen.
+        extensions:
+          type: array
+          items: { type: string }
+          description: Extension-library ids loaded at launch.
 
     ProfileListItem:
       allOf:
@@ -910,6 +1726,14 @@ components:
             pinned: { type: boolean }
             folder: { type: string }
             temporary: { type: boolean }
+            rev:
+              type: integer
+              description: >
+                Bumped by every write. The desktop editor sends back the
+                number it opened the profile at, so a save that would land on
+                top of a change made through this API is refused rather than
+                silently reverting it. API edits are never refused; they read
+                the profile and write it back in one step.
         running: { type: boolean }
         cdp:
           nullable: true
@@ -1013,3 +1837,164 @@ components:
         password: { type: string }
         country: { type: string }
         notes: { type: string }
+
+    AutomationBranch:
+      description: |
+        Where the run goes after a step. A plain string for the simple cases,
+        an object for the ones carrying a value.
+      oneOf:
+        - type: string
+          enum: [next, stop, endpass]
+          description: |
+            `next` — the step below. `stop` — end this profile's whole run.
+            `endpass` — end this pass; the next one starts from the top.
+        - type: object
+          properties:
+            goto: { type: string, description: "Block id to jump to; one that no longer exists behaves as next." }
+        - type: object
+          properties:
+            retry: { type: integer, description: "Try this same step again, that many more times, then take next." }
+
+    AutomationBlock:
+      type: object
+      description: One step. `kind` and `params` are open — a module can add a kind this build has never heard of.
+      properties:
+        id: { type: string }
+        kind:
+          type: string
+          description: |
+            A palette kind (`goto`, `click`, `type`, `profile.create`,
+            `var.set`, …) or `module:<module id>:<block>`.
+
+            **On a phone profile** the ordinary steps already become touches —
+            `click` taps, `rightClick` long-presses, `scroll` and `swipe` use a
+            finger — and `hover` is refused, because a phone has no cursor.
+            These are the ones with no desktop twin, and they are refused on a
+            desktop profile for the same reason:
+
+            | kind | params | what it does |
+            | --- | --- | --- |
+            | `touch.tap` | `selector` or `x`+`y`, `tapCount` (1–3), `timeout` | A tap, with the contact drifting the way a fingertip does. |
+            | `touch.longPress` | `selector` or `x`+`y`, `timeout` | Press and hold — the phone's context menu. |
+            | `touch.swipe` | `selector` or `x`+`y`, `dx`, `dy`, `timeout` | A swipe. The browser makes the scroll and the fling out of the touch stream. |
+            | `touch.drag` | `selector`, `to`, `holdMs`, `timeout` | Press, wait for the item to be picked up, carry it, set it down. The wait is what makes it a drag and not a scroll. |
+            | `touch.pinch` | `scale`, `selector` or `x`+`y` | Two fingers, to zoom. Above 1 spreads. |
+            | `screen.rotate` | `angle` (0/90/180/270), `turnMs`, `into` | Turns the handset: the sensors move first, the picture commits at the end. `into` saves the new `screen.orientation.type`. |
+          example: click
+        label: { type: string }
+        params:
+          type: object
+          additionalProperties: true
+          description: The step's own fields, as the palette defines them.
+        enabled: { type: boolean, default: true }
+        x: { type: number, description: "Canvas position. Layout only — the run follows the branches." }
+        y: { type: number }
+        on_done: { $ref: "#/components/schemas/AutomationBranch" }
+        on_fail:
+          allOf:
+            - $ref: "#/components/schemas/AutomationBranch"
+          description: Defaults to `stop` — carrying on after a click that found nothing is how a run types into the wrong page.
+        secrets:
+          type: array
+          items: { type: string }
+          description: Parameter names emptied on export.
+
+    AutomationRunSettings:
+      type: object
+      properties:
+        threads: { type: integer, default: 1, description: "Browsers running at once; clamped to 1–64." }
+        loops: { type: integer, default: 1, description: "Passes over the blocks. 0 means run until `hours` is up." }
+        hours: { type: number, description: "Only meaningful when `loops` is 0." }
+        start: { type: string, description: "Block id to start at; empty means the first." }
+        profiles:
+          type: array
+          items: { type: string }
+          description: Kept for projects saved before profiles became blocks; one thread each when set.
+
+    AutomationProject:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        notes: { type: string }
+        blocks:
+          type: array
+          items: { $ref: "#/components/schemas/AutomationBlock" }
+        run: { $ref: "#/components/schemas/AutomationRunSettings" }
+        created_at: { type: integer, description: "Unix seconds." }
+        updated_at: { type: integer, description: "Unix seconds." }
+
+    AutomationBundle:
+      type: object
+      description: A project on its way to another machine.
+      properties:
+        format: { type: integer, example: 1, description: "An import refuses a number it does not know." }
+        exported_at: { type: integer, description: "Unix seconds." }
+        project: { $ref: "#/components/schemas/AutomationProject" }
+        modules:
+          type: array
+          items: { type: string }
+          description: Module ids the steps need.
+        module_files:
+          type: array
+          description: |
+            Those modules' files, carried inside the bundle so an imported
+            project can run where it lands. A module missing from disk at
+            export time is left out here but still named in `modules`. On
+            import, a module already installed under the same id is kept as it
+            is rather than overwritten.
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              wasm: { type: string, description: "The .wasm, gzipped then base64." }
+        needs:
+          type: array
+          description: What export blanked, so an import can ask for exactly that.
+          items:
+            type: object
+            properties:
+              block_id: { type: string }
+              label: { type: string }
+              params:
+                type: array
+                items: { type: string }
+
+    AutomationWorker:
+      type: object
+      description: One browser inside a run.
+      properties:
+        profile_id: { type: string }
+        profile_name: { type: string }
+        pass: { type: integer, description: "1-based; 0 before the first pass starts." }
+        step: { type: integer }
+        steps_total: { type: integer }
+        status: { type: string, enum: [queued, starting, running, done, failed, stopped] }
+        note: { type: string }
+
+    AutomationRun:
+      type: object
+      properties:
+        project_id: { type: string, format: uuid }
+        project_name: { type: string }
+        started_at: { type: integer, description: "Unix seconds." }
+        running: { type: boolean }
+        workers:
+          type: array
+          items: { $ref: "#/components/schemas/AutomationWorker" }
+        log:
+          type: array
+          items: { type: string }
+          description: The tail the fleet window shows; the whole log is on disk under `automation-runs/`.
+
+    AutomationModule:
+      type: object
+      properties:
+        id: { type: string, description: "File stem; also the prefix every one of its block kinds carries." }
+        name: { type: string }
+        path: { type: string }
+        blocks:
+          type: array
+          items: { type: object, additionalProperties: true }
+          description: Block descriptors, in the same shape as the built-in palette.
+        error: { type: string, description: "Empty when the module loaded; otherwise why it did not." }

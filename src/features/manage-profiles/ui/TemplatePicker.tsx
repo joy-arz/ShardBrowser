@@ -3,6 +3,8 @@ import { Modal } from "@proxyshard/shardx-ui-kit";
 import type { FingerprintEntry } from "../../../entities/fingerprint";
 import { fingerprintList } from "../../../entities/fingerprint";
 import { hostPlatform } from "../../../entities/profile";
+import { useGpuCompat } from "../../../shared/model/gpuCompat";
+import { IncompatibleBadge } from "../../gpu-compat";
 
 export function TemplatePicker({
   fingerprints,
@@ -25,6 +27,13 @@ export function TemplatePicker({
   }, [fingerprints]);
   // Only host-matching fingerprints (UA/fonts/WebGL renderer are host-coupled).
   const tpls = host ? lib.filter((e) => e.platform === host) : [];
+  // Verdicts for the badge. Loading here as well as in the editor is
+  // deliberate: whichever the operator opens first pays for the probe, and the
+  // store makes the second one free.
+  const compatById = useGpuCompat((st) => st.byId);
+  const loadCompat = useGpuCompat((st) => st.load);
+  useEffect(() => { void loadCompat(); }, [loadCompat]);
+
   return (
     <Modal
       open
@@ -49,9 +58,12 @@ export function TemplatePicker({
                 className="absolute left-0 right-0 top-0 h-[3px] opacity-85"
                 style={{ background: t.tag_color }}
               />
-              <div className="mt-1 flex items-center justify-between text-subheading-2xs">
+              <div className="mt-1 flex items-center justify-between gap-2 text-subheading-2xs">
                 <span className="text-primary-base">{t.platform}</span>
-                <span className="text-text-soft-400">Chrome {t.chrome}</span>
+                <span className="flex items-center gap-1.5">
+                  {compatById[t.id] && <IncompatibleBadge compat={compatById[t.id]} />}
+                  <span className="text-text-soft-400">Chrome {t.chrome}</span>
+                </span>
               </div>
               <div className="mt-0.5 text-label-sm text-text-strong-950">{t.label}</div>
               <div className="mono text-[11.5px] text-text-soft-400">{t.gpu}</div>

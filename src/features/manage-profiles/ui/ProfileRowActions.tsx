@@ -9,11 +9,13 @@ import {
   StopIcon,
 } from "../../../shared/icons";
 import { useProfile, type ProfileMeta } from "../../../entities/profile";
+import { useT } from "../../../shared/i18n";
 
 export function ProfileRowActions({ profile, onMore }: {
   profile: ProfileMeta;
   onMore: (e: React.MouseEvent) => void;
 }) {
+  const t = useT();
   const p = profile;
   const isRunning = useProfile((s) => !!s.running[p.id]);
   const isStarting = useProfile((s) => s.startBusy.has(p.id));
@@ -38,9 +40,9 @@ export function ProfileRowActions({ profile, onMore }: {
         }
         onClick={() => startStop(p)}
         disabled={!isRunning && isStarting}
-        title={!isRunning && isStarting ? "Starting (UDP probe + geo + spawn)…" : undefined}
+        title={!isRunning && isStarting ? t("profileRowActions.startingTitle") : undefined}
       >
-        {isRunning ? "Stop" : isStarting ? "Starting…" : "Start"}
+        {isRunning ? t("profileRowActions.stop") : isStarting ? t("profileRowActions.starting") : t("profileRowActions.start")}
       </Button>
       <Button
         variant={p.pinned ? "primary" : "neutral"}
@@ -48,20 +50,20 @@ export function ProfileRowActions({ profile, onMore }: {
         size="xsmall"
         onlyIcon
         onClick={() => togglePin(p)}
-        title={p.pinned ? "Unpin" : "Pin to top"}
+        title={p.pinned ? t("profileRowActions.unpin") : t("profileRowActions.pinToTop")}
         leftIcon={<PinIconApp className="size-4" />}
       >
       
       </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => expand(p.id)} title="Edit"
+      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => expand(p.id)} title={t("profileRowActions.edit")}
         leftIcon={<EditIcon className="size-4" />}
       >
       </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => cloneProfile(p.id)} title="Clone"
+      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => cloneProfile(p.id)} title={t("profileRowActions.clone")}
         leftIcon={<CopyIcon className="size-4" />}
       >
       </Button>
-      <Button variant="error" mode='filled' size="xsmall" onlyIcon onClick={() => remove(p.id)} title="Delete"
+      <Button variant="error" mode='filled' size="xsmall" onlyIcon onClick={() => remove(p.id)} title={t("profileRowActions.delete")}
         leftIcon={<DeleteIcon className="size-4" />}
       >
       </Button>
@@ -71,7 +73,7 @@ export function ProfileRowActions({ profile, onMore }: {
         size="xsmall"
         onlyIcon
         onClick={onMore}
-        title="More actions"
+        title={t("profileRowActions.moreActions")}
         leftIcon={<MoreIcon className="size-4" />}
       >
       </Button>

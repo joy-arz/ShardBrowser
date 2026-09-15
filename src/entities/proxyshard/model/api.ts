@@ -19,3 +19,5 @@ export const psProfileTraffic = (proxyType: string) => invoke<any>("ps_profile_t
 export const psCountries = (proxyType: string) => invoke<any>("ps_countries", { proxyType });
 export const psRegions = (proxyType: string, countryCode: string) => invoke<any>("ps_regions", { proxyType, countryCode });
 export const psCities = (proxyType: string, countryCode: string, regionCode: string) => invoke<any>("ps_cities", { proxyType, countryCode, regionCode });
+export const psResiIsps = (tier: string, country: string, region: string, city: string) =>
+  invoke<any>("ps_resi_isps", { tier, country, region, city });

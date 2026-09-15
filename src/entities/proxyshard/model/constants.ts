@@ -1,8 +1,11 @@
 import type { ResiType } from "./types";
+import { t } from "../../../shared/i18n";
 
 // p0f OS-fingerprint signatures (signature/set endpoint enum).
+// `label` is a getter: the list is built once at import time, so the language
+// has to be looked up when the label is read, not here.
 export const PS_SIGNATURES: { value: string; label: string }[] = [
-  { value: "", label: "Don't set" },
+  { value: "", get label() { return t("constants.signatureNone"); } },
   { value: "ios", label: "iOS" },
   { value: "macos", label: "macOS" },
   { value: "android", label: "Android" },

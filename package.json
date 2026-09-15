@@ -1,7 +1,7 @@
 {
   "name": "shardx-launcher",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,8 @@
     "prebuild": "npm run build:ui-kit",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:i18n": "node scripts/check-i18n.mjs"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.3.0",

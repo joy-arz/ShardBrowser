@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Checkbox, Pagination } from "@proxyshard/shardx-ui-kit";
 import { ShardLogo } from "../../shared/icons";
+import { useT } from "../../shared/i18n";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
 import {
   useProfile,
@@ -17,6 +18,7 @@ import { ProfileRow } from "./ProfileRow";
 const PAGE_SIZE = 20;
 
 export function ProfileTable() {
+  const t = useT();
   const selected = useProfile((s) => s.selected);
   const selectProfiles = useProfile((s) => s.selectProfiles);
   const expanded = useProfile((s) => s.expanded);
@@ -68,19 +70,19 @@ export function ProfileTable() {
           <div></div>
           <div>
             <Checkbox
-              title="Select all on this page"
+              title={t("profileTable.selectAllOnPage")}
               // Header checkbox toggles only visible page rows; other pages preserved.
               checked={allPageSelected}
               indeterminate={anyPageSelected && !allPageSelected}
               onChange={(e) => selectProfiles(e.target.checked, paged)}
             />
           </div>
-          <div>Name</div>
-          <div>Status</div>
-          <div>Proxy</div>
-          <div>Notes</div>
-          <div>Time</div>
-          <div>Last run</div>
+          <div>{t("profileTable.colName")}</div>
+          <div>{t("profileTable.colStatus")}</div>
+          <div>{t("profileTable.colProxy")}</div>
+          <div>{t("profileTable.colNotes")}</div>
+          <div>{t("profileTable.colTime")}</div>
+          <div>{t("profileTable.colLastRun")}</div>
           <div></div>
         </div>
         {expanded === "__new__" && (
@@ -101,9 +103,9 @@ export function ProfileTable() {
             <div className="grid size-14 place-items-center rounded-[14px] bg-primary-alpha-10 text-primary-base ring-1 ring-inset ring-primary-alpha-24">
               <ShardLogo />
             </div>
-            <h3 className="m-0 text-label-sm text-text-strong-950">No profiles yet</h3>
+            <h3 className="m-0 text-label-sm text-text-strong-950">{t("profileTable.emptyTitle")}</h3>
             <p className="m-0 max-w-[420px] text-paragraph-sm text-text-sub-600">
-              Pick a fingerprint template to start from a curated real-Chrome snapshot, or build one from scratch.
+              {t("profileTable.emptyHint")}
             </p>
             <div className="mt-2 flex gap-2">
               <FromTemplateButton />
@@ -119,7 +121,7 @@ export function ProfileTable() {
             totalPages={pageCount}
             asLinks={false}
             onPageChange={setPage}
-            infoLabel={(p, total) => `Page ${p} of ${total} · ${visible.length} profiles`}
+            infoLabel={(p, total) => t("profileTable.pageInfo", { page: p, total, count: visible.length })}
           />
         </div>
       )}

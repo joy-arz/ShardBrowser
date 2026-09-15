@@ -4,7 +4,10 @@ import { HOST_OS } from "../../shared/lib/utils";
 import { portableStatus } from "../../entities/portable";
 import { useSafeClose } from "../SafeClose/SafeClose";
 
+import { useT } from "../../shared/i18n";
+
 export function TitleBar() {
+  const t = useT();
   // Portable Mode indicator — always visible while the app runs in it, so the
   // user can never lose track of which copy of their data is live or whether
   // this PC takes the local-cache speed path.
@@ -26,7 +29,7 @@ export function TitleBar() {
       data-tauri-drag-region
     >
       <span className="pointer-events-none text-label-xs tracking-[0.4px] text-text-soft-400">
-        ShardX Launcher
+        {t("titleBar.appName")}
       </span>
       {portable.active && (
         <span className="pointer-events-none ml-2 flex items-center gap-1.5">
@@ -55,7 +58,7 @@ export function TitleBar() {
         <div className="absolute right-0 top-0 flex h-full">
           <button
             className="flex h-full w-[46px] cursor-default items-center justify-center border-none bg-transparent p-0 text-icon-soft-400 hover:bg-bg-weak-50 hover:text-icon-strong-950"
-            aria-label="Minimize"
+            aria-label={t("titleBar.minimize")}
             onClick={() => getCurrentWindow().minimize()}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -64,7 +67,7 @@ export function TitleBar() {
           </button>
           <button
             className="flex h-full w-[46px] cursor-default items-center justify-center border-none bg-transparent p-0 text-icon-soft-400 hover:bg-bg-weak-50 hover:text-icon-strong-950"
-            aria-label="Maximize"
+            aria-label={t("titleBar.maximize")}
             onClick={() => getCurrentWindow().toggleMaximize()}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">

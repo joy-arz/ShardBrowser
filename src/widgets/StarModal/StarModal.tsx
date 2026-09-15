@@ -3,16 +3,18 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, Modal } from "@proxyshard/shardx-ui-kit";
 import { GithubMark } from "../../shared/icons";
 import { GH_REPO_URL } from "../../shared/lib/utils";
+import { useT } from "../../shared/i18n";
 
 /// One-time GitHub-star prompt shown after the app first loads. Dismissal is
 /// remembered in localStorage so it never nags again.
 export function StarModal() {
+  const t = useT();
   const [show, setShow] = useState(false);
   useEffect(() => {
     if (localStorage.getItem("shardx-star-prompt") === "done") return;
     // Let the UI settle before surfacing the prompt.
-    const t = setTimeout(() => setShow(true), 700);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setShow(true), 700);
+    return () => clearTimeout(timer);
   }, []);
   const close = () => {
     localStorage.setItem("shardx-star-prompt", "done");
@@ -30,18 +32,18 @@ export function StarModal() {
           <GithubMark size={26} />
           <span className="absolute -top-[5px] right-[-3px] text-[19px] leading-none text-warning-base">★</span>
         </div>
-        <h2 className="m-0 mb-2 text-title-h6 text-text-strong-950">Enjoying ShardX?</h2>
+        <h2 className="m-0 mb-2 text-title-h6 text-text-strong-950">{t("starModal.title")}</h2>
         <p className="m-0 mb-[22px] text-paragraph-sm text-text-sub-600">
-          ShardX is provided and supported <strong>completely free</strong>. If it's
-          useful to you, dropping a <strong>star on GitHub</strong> is the easiest way to
-          support us — and it helps other people find the project.
+          {t("starModal.blurbPart1")}<strong>{t("starModal.freeWord")}</strong>
+          {t("starModal.blurbPart2")}<strong>{t("starModal.starWord")}</strong>
+          {t("starModal.blurbPart3")}
         </p>
         <div className="flex justify-center gap-2.5">
           <Button variant="neutral" mode="stroke" size="small" onClick={close}>
-            Maybe later
+            {t("starModal.later")}
           </Button>
           <Button variant="primary" mode="filled" size="small" leftIcon={<GithubMark />} onClick={star}>
-            Star on GitHub
+            {t("starModal.starButton")}
           </Button>
         </div>
       </div>

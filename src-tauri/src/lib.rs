@@ -1,11 +1,17 @@
 // ShardX Launcher — Tauri backend.
 
+mod profile_icon;
 mod api;
+mod bookmarks;
 mod cookies;
+mod extensions;
 mod fingerprints;
+mod gpu_caps;
 mod launch;
 mod mcp_setup;
 mod portable;
+mod sequential;
+mod migrate;
 mod process;
 mod profile;
 mod proxy;
@@ -13,6 +19,15 @@ mod psapi;
 mod runtime;
 mod settings;
 mod store;
+mod sync_bus;
+mod automation;
+mod cdp;
+mod requests;
+mod db;
+mod modguard;
+mod runner;
+mod wasm;
+mod trash;
 
 use serde_json::Value;
 
@@ -35,8 +50,20 @@ pub fn main_window() -> Option<tauri::WebviewWindow> {
 /// profile/proxy created or removed through the automation API or MCP, which
 /// writes straight to disk without the React state ever knowing.  The view
 /// listens for `store-changed` and reloads, so the new items appear without an
-/// app restart.  `kind` ("profiles" | "proxies") is informational; the UI
+/// app restart.  `kind` ("profiles" | "proxies" | "automation") is informational; the UI
 /// reloads both lists regardless.  No-op when headless (no window).
+/// A warning the user has to see — shown as a toast. stderr is not a place a
+/// user looks, and a profile silently running on the host's clock is worth an
+/// interruption.
+pub fn notify_warning(text: impl Into<String>) {
+    use tauri::Emitter;
+    let text = text.into();
+    eprintln!("[launcher] WARNING: {text}");
+    if let Some(w) = main_window() {
+        let _ = w.emit("launcher-warning", text);
+    }
+}
+
 pub fn notify_store_changed(kind: &str) {
     use tauri::Emitter;
     if let Some(w) = main_window() {
@@ -294,8 +321,8 @@ pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
 }
 
 /// Clamp profile.screen to the real display when it's smaller than the FP claim.
-/// On Win/Linux always use the real display (presets rarely match user monitors).
-fn clamp_screen_to_real_display(
+/// A profile keeps the screen it declares while the real display can hold it.
+pub fn clamp_screen_to_real_display(
     window: &tauri::WebviewWindow,
     payload: &mut serde_json::Map<String, Value>,
 ) {
@@ -334,14 +361,21 @@ fn clamp_screen_to_real_display(
     if fp_w <= 0 || fp_h <= 0 {
         return;
     }
-    // macOS keeps curated FP unless real display smaller; Win/Linux always uses real.
-    if cfg!(target_os = "macos") {
-        if real_w >= fp_w && real_h >= fp_h {
-            eprintln!(
-                "[launcher] display: real {real_w}x{real_h} >= fp {fp_w}x{fp_h} — keeping FP screen (macOS)"
-            );
-            return;
-        }
+    // A screen the profile declares is kept whenever the real display can hold
+    // it; the clamp exists for the other case, where a window simply cannot be
+    // bigger than the monitor it opens on.
+    //
+    // This used to be the macOS rule only, and Windows/Linux overwrote the
+    // declared screen with the host display on every start. That handed every
+    // profile on one machine the SAME high-entropy pair — on a 5120x1440
+    // monitor, all of them said 5120x1440 — which is the opposite of what a
+    // per-profile screen is for, and it ignored what the profile's own API
+    // caller had asked for.
+    if real_w >= fp_w && real_h >= fp_h {
+        eprintln!(
+            "[launcher] display: real {real_w}x{real_h} >= fp {fp_w}x{fp_h} — keeping FP screen"
+        );
+        return;
     }
 
     // Preserve FP menubar/dock insets for avail_*.
@@ -359,8 +393,12 @@ fn clamp_screen_to_real_display(
         scr_mut.insert("avail_height".into(), Value::from(avail_h));
         scr_mut.insert("device_pixel_ratio".into(), Value::from(scale));
     }
-    // Keep window inside the avail area.
-    if let Some(win) = payload.get_mut("window").and_then(|v| v.as_object_mut()) {
+    // Keep window inside the avail area; a profile with no window block gets one,
+    // otherwise the browser falls back to Chromium's own small default size.
+    let win_slot = payload
+        .entry("window")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(win) = win_slot.as_object_mut() {
         win.insert("outer_width".into(), Value::from(avail_w));
         win.insert("inner_width".into(), Value::from(avail_w));
         let outer_h = (avail_h - 1).max(1);
@@ -414,6 +452,28 @@ pub fn save_profile_core(
         }
     }
 
+    // The editor rebuilds the whole profile from its own form, so a save on top
+    // of a change made elsewhere (the API, a second window) would revert it.
+    // A payload that carries the rev it was opened at is checked against disk;
+    // one that carries none is an internal caller and passes.
+    if !is_new {
+        let meta = payload.get("_meta");
+        let id = meta
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if let Some(sent) = meta.and_then(|m| m.get("rev")).and_then(|v| v.as_u64()) {
+            let on_disk = profile::current_rev(id);
+            if sent != on_disk {
+                return Err(format!(
+                    "This profile changed after you opened it (rev {on_disk}, you have {sent}) \
+                     — probably through the API or another window. Reopen it and apply your \
+                     changes to the current version."
+                ));
+            }
+        }
+    }
+
     let mut stored: profile::StoredProfile =
         serde_json::from_value(payload).map_err(|e| e.to_string())?;
     profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
@@ -439,12 +499,556 @@ pub fn save_profile_core(
         pinned: stored.meta.pinned,
         folder: stored.meta.folder,
         total_runtime_ms: stored.meta.total_runtime_ms,
+        color: stored.meta.color,
+        extensions: stored.meta.extensions,
+        mobile: profile::claims_mobile(&stored.config),
+        android_media: false,
     })
 }
 
+/// Into the trash for a week; only the files carrying the account are kept.
 #[tauri::command]
 fn profile_delete(id: String) -> Result<(), String> {
-    profile::delete(&id).map_err(|e| e.to_string())
+    trash::move_to_trash(&id).map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ---- Automation ----
+
+/// Whether this build has the automation section compiled in. Always present,
+/// so the UI can ask before it renders anything.
+#[tauri::command]
+fn automation_available() -> bool {
+    cfg!(feature = "automation")
+}
+
+#[tauri::command]
+fn automation_list() -> Result<Vec<automation::Project>, String> {
+    automation::list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn automation_create(name: String) -> Result<automation::Project, String> {
+    automation::create(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn automation_save(project: automation::Project) -> Result<automation::Project, String> {
+    automation::save(project).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn automation_delete(id: String) -> Result<(), String> {
+    automation::delete(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn automation_duplicate(id: String) -> Result<automation::Project, String> {
+    automation::duplicate(&id).map_err(|e| e.to_string())
+}
+
+/// Starts a profile WITH automation on, and attaches. The ordinary UI launch
+/// deliberately leaves CDP off, so the studio needs its own door.
+#[tauri::command]
+async fn automation_launch(app: tauri::AppHandle, profile_id: String) -> Result<u32, String> {
+    #[cfg(feature = "automation")]
+    {
+        if migrate::in_progress() {
+            return Err("profiles are being moved — try again when that finishes".into());
+        }
+        // CDP cannot be turned on for a live process, so attaching to one opened
+        // without it would give a focused window with no frames and no control.
+        if is_profile_running(&profile_id)
+            && process::Tracker::shared().cdp(&profile_id).is_none()
+        {
+            return Err(
+                "This profile is already open without debugging. Close it, then open it here."
+                    .into(),
+            );
+        }
+        let b = bus().await?;
+        // (enable_cdp, headless) — the studio needs a visible window with CDP on.
+        let out = launch::launch_profile_synced(&profile_id, true, false, None, b.port, &b.token)
+            .await
+            .map_err(|e| e.to_string())?;
+        automation_attach(app, profile_id).await?;
+        return Ok(out.pid);
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (app, profile_id);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+/// Attaches to a profile already running with CDP on; frames arrive as
+/// `automation:frame`. Only bodies are gated — Tauri's command list takes no `#[cfg]`.
+#[tauri::command]
+async fn automation_attach(app: tauri::AppHandle, profile_id: String) -> Result<(), String> {
+    #[cfg(feature = "automation")]
+    {
+        use tauri::Emitter;
+        let info = process::Tracker::shared()
+            .cdp(&profile_id)
+            .ok_or_else(|| "that profile is not running with automation on".to_string())?;
+        let handle = app.clone();
+        let nav_handle = app.clone();
+        let ev_handle = app.clone();
+        let ev_profile = profile_id.clone();
+        return cdp::attach_with(
+            profile_id,
+            info.web_socket_debugger_url,
+            move |frame| {
+                let _ = handle.emit("automation:frame", frame);
+            },
+            move |profile_id, url| {
+                let _ = nav_handle.emit(
+                    "automation:navigated",
+                    serde_json::json!({ "profile_id": profile_id, "url": url }),
+                );
+            },
+            // Surface the interceptor's paused-request events to the studio so
+            // it can answer them with Traffic.resolve.
+            move |method, params| {
+                let topic = match method.as_str() {
+                    "Traffic.requestPaused" => "automation:traffic-paused",
+                    "Traffic.requestObserved" => "automation:traffic-observed",
+                    _ => return,
+                };
+                let _ = ev_handle.emit(
+                    topic,
+                    serde_json::json!({ "profile_id": ev_profile, "params": params }),
+                );
+            },
+        )
+        .await
+        .map_err(|e| e.to_string());
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (app, profile_id);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+#[tauri::command]
+fn automation_detach(profile_id: String) {
+    #[cfg(feature = "automation")]
+    cdp::detach(&profile_id);
+    #[cfg(not(feature = "automation"))]
+    let _ = profile_id;
+}
+
+#[tauri::command]
+fn automation_attached(profile_id: String) -> bool {
+    #[cfg(feature = "automation")]
+    return cdp::is_attached(&profile_id);
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = profile_id;
+        false
+    }
+}
+
+#[tauri::command]
+async fn automation_screencast(
+    profile_id: String,
+    on: bool,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    #[cfg(feature = "automation")]
+    {
+        return if on {
+            cdp::start_screencast(&profile_id, width, height).await
+        } else {
+            cdp::stop_screencast(&profile_id).await
+        }
+        .map_err(|e| e.to_string());
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (profile_id, on, width, height);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+/// What this desktop lets the launcher do with windows: browsers still place
+/// themselves over X11/XWayland, but under Wayland our own panels cannot.
+#[tauri::command]
+fn automation_display() -> serde_json::Value {
+    #[cfg(target_os = "linux")]
+    {
+        let wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+            || std::env::var("XDG_SESSION_TYPE")
+                .map(|v| v.eq_ignore_ascii_case("wayland"))
+                .unwrap_or(false);
+        // The same condition launch.rs pins --ozone-platform=x11 on.
+        let x_display = std::env::var_os("DISPLAY").is_some();
+        let browser_placement = !wayland || x_display;
+        let panels = !wayland;
+        let note = if !browser_placement {
+            "This is a Wayland session with no X display for the browser to fall back to, so it \
+             runs as a Wayland window: it cannot place itself, arranging browsers does nothing, \
+             and the launcher cannot keep the Fleet window above the others either. Install \
+             XWayland, or log in with an Xorg session. Recording and running still work — the \
+             live view comes over the debugging connection, not off the screen."
+        } else if !panels {
+            "This is a Wayland session. Browsers still arrange themselves, because they run \
+             through XWayland, but the launcher cannot keep its own Fleet window above the \
+             others or place it — a Wayland application is not allowed to. Log in with an Xorg \
+             session if you need that."
+        } else {
+            ""
+        };
+        return serde_json::json!({
+            "server": if wayland { "wayland" } else { "x11" },
+            "limited": !browser_placement || !panels,
+            "note": note,
+            "browser_placement": browser_placement,
+            "panels": panels,
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    serde_json::json!({
+        "server": "native",
+        "limited": false,
+        "note": "",
+        "browser_placement": true,
+        "panels": true,
+    })
+}
+
+// ---- Modules ----
+
+/// Every TLS/HTTP2 fingerprint the request steps can wear. Read off the
+/// library, so it stays right when the library is updated.
+#[tauri::command]
+fn automation_tls_fingerprints() -> Vec<String> {
+    #[cfg(feature = "automation")]
+    return requests::fingerprints();
+    #[cfg(not(feature = "automation"))]
+    Vec::new()
+}
+
+#[tauri::command]
+fn automation_modules() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(feature = "automation")]
+    return wasm::list()
+        .map(|v| v.into_iter().filter_map(|m| serde_json::to_value(m).ok()).collect())
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "automation"))]
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+fn automation_module_install(path: String) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    return wasm::install(&path)
+        .map(|m| serde_json::to_value(m).unwrap_or_default())
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = path;
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+#[tauri::command]
+fn automation_module_remove(id: String) -> Result<(), String> {
+    #[cfg(feature = "automation")]
+    return wasm::remove(&id).map_err(|e| e.to_string());
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = id;
+        Ok(())
+    }
+}
+
+
+/// What a module asks to be allowed to call, and what it was allowed.
+#[tauri::command]
+fn automation_module_permissions(id: String) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    return Ok(serde_json::json!({
+        "asks": wasm::manifest_of(&id),
+        "granted": wasm::grant_for(&id),
+    }));
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = id;
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+/// Records what the operator allowed this module to call.
+#[tauri::command]
+fn automation_module_grant(
+    id: String,
+    modules: Vec<String>,
+    flows: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    return wasm::set_grant(&id, modules, flows)
+        .map(|g| serde_json::to_value(g).unwrap_or_default())
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (id, modules, flows);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+#[tauri::command]
+fn automation_modules_dir() -> Result<String, String> {
+    #[cfg(feature = "automation")]
+    return wasm::modules_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "automation"))]
+    Err("automation is not compiled into this build".into())
+}
+
+// ---- Export / import ----
+
+#[tauri::command]
+fn automation_export(project_id: String) -> Result<serde_json::Value, String> {
+    automation::export(&project_id)
+        .map(|b| serde_json::to_value(b).unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn automation_import(bundle: serde_json::Value) -> Result<automation::Project, String> {
+    let parsed: automation::Bundle =
+        serde_json::from_value(bundle).map_err(|e| format!("that is not a project bundle: {e}"))?;
+    automation::import(parsed).map_err(|e| e.to_string())
+}
+
+/// Starts the project. Answers as soon as the run is under way; progress is
+/// read back with `automation_run_status`.
+#[tauri::command]
+async fn automation_run(project_id: String) -> Result<(), String> {
+    #[cfg(feature = "automation")]
+    {
+        return runner::start(&project_id).await.map_err(|e| e.to_string());
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = project_id;
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+#[tauri::command]
+fn automation_run_stop(project_id: String) {
+    #[cfg(feature = "automation")]
+    runner::stop(&project_id);
+    #[cfg(not(feature = "automation"))]
+    let _ = project_id;
+}
+
+#[tauri::command]
+fn automation_run_status(project_id: String) -> Option<serde_json::Value> {
+    #[cfg(feature = "automation")]
+    return runner::status(&project_id).and_then(|s| serde_json::to_value(s).ok());
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = project_id;
+        None
+    }
+}
+
+/// Every run going right now — what the fleet window shows.
+#[tauri::command]
+fn automation_fleet() -> Vec<serde_json::Value> {
+    #[cfg(feature = "automation")]
+    return runner::all()
+        .into_iter()
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
+    #[cfg(not(feature = "automation"))]
+    Vec::new()
+}
+
+/// Opens (or re-focuses) the fleet window: one row per browser in a run.
+/// `async` for the same reason as `helper_show` — a webview built on the main
+/// thread deadlocks Windows.
+#[tauri::command]
+async fn automation_fleet_window(app: tauri::AppHandle) {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    if let Some(w) = app.get_webview_window("fleet") {
+        let _ = w.set_focus();
+        return;
+    }
+    let built = WebviewWindowBuilder::new(&app, "fleet", WebviewUrl::App("index.html#/?fleet=1".into()))
+        .title("ShardX Fleet")
+        .inner_size(460.0, 420.0)
+        .min_inner_size(360.0, 240.0)
+        .always_on_top(true)
+        .build();
+    if let Err(e) = built {
+        eprintln!("[launcher] fleet window unavailable: {e}");
+    }
+}
+
+/// Resolves the element under a viewport point, natively. A recorded step stores
+/// what this returns, so replay finds the element again at a different window size.
+#[tauri::command]
+async fn automation_pick(
+    profile_id: String,
+    x: f64,
+    y: f64,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        return cdp::pick_element(&profile_id, x, y)
+            .await
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (profile_id, x, y);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+/// One raw CDP call against the attached page. The studio drives every page
+/// action through the Motion domain, and this is the only door.
+#[tauri::command]
+async fn automation_call(
+    profile_id: String,
+    method: String,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        return cdp::page_call(&profile_id, &method, params)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (profile_id, method, params);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+// ---- Trash ----
+
+#[tauri::command]
+fn trash_list() -> Result<Vec<trash::TrashEntry>, String> {
+    trash::list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn trash_restore(id: String) -> Result<profile::ProfileMeta, String> {
+    trash::restore(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn trash_purge(id: String) -> Result<(), String> {
+    trash::purge(&id).map_err(|e| e.to_string())
+}
+
+/// Empties the trash for good; returns how many went.
+#[tauri::command]
+fn trash_empty() -> Result<usize, String> {
+    let entries = trash::list().map_err(|e| e.to_string())?;
+    let n = entries.len();
+    for e in entries {
+        trash::purge(&e.id).map_err(|e| e.to_string())?;
+    }
+    Ok(n)
+}
+
+// ---- Extensions ----
+
+#[tauri::command]
+fn extension_list() -> Result<Vec<extensions::ExtensionEntry>, String> {
+    extensions::list().map_err(|e| e.to_string())
+}
+
+/// Returns what went in, so one bad file in a multi-select loses only itself.
+#[tauri::command]
+fn extension_import(paths: Vec<String>) -> Result<Vec<extensions::ExtensionEntry>, String> {
+    let mut out = Vec::new();
+    let mut errs = Vec::new();
+    for p in &paths {
+        match extensions::import(std::path::Path::new(p)) {
+            Ok(e) => out.push(e),
+            Err(e) => errs.push(format!("{p}: {e}")),
+        }
+    }
+    if out.is_empty() && !errs.is_empty() {
+        return Err(errs.join("; "));
+    }
+    Ok(out)
+}
+
+/// Import from a Web Store link, a bare extension id, or a direct .crx / .zip
+/// URL — the launcher fetches the file itself.
+#[tauri::command]
+async fn extension_import_url(url: String) -> Result<extensions::ExtensionEntry, String> {
+    extensions::import_url(&url).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn extension_delete(id: String) -> Result<(), String> {
+    extensions::delete(&id).map_err(|e| e.to_string())
+}
+
+// ---- Bookmarks ----
+
+#[tauri::command]
+fn bookmark_list() -> Result<Vec<bookmarks::Bookmark>, String> {
+    bookmarks::list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn bookmark_save(entry: bookmarks::Bookmark) -> Result<bookmarks::Bookmark, String> {
+    bookmarks::save(entry).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn bookmark_delete(id: String) -> Result<(), String> {
+    bookmarks::delete(&id).map_err(|e| e.to_string())
+}
+
+// ---- Data root ----
+
+#[derive(serde::Serialize)]
+struct DataRootInfo {
+    path: String,
+    /// False while the data still lives in the config dir.
+    custom: bool,
+    migrating: bool,
+}
+
+#[tauri::command]
+fn data_root_get() -> Result<DataRootInfo, String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    let path = store::data_root().map_err(|e| e.to_string())?;
+    Ok(DataRootInfo {
+        path: path.display().to_string(),
+        custom: s.data_root.is_some(),
+        migrating: migrate::in_progress(),
+    })
+}
+
+/// Progress goes out as `data-migration` events; nothing launches until done.
+#[tauri::command]
+async fn data_root_migrate(app: tauri::AppHandle, path: String) -> Result<u64, String> {
+    let _gate = sequential::launch_gate().lock().await;
+    if sequential::active() { return Err("stop sequential automation before moving profiles".into()); }
+    if !process::Tracker::shared().running().is_empty() {
+        return Err("close every running profile first".into());
+    }
+    let dst = std::path::PathBuf::from(&path);
+    tauri::async_runtime::spawn_blocking(move || migrate::run(&app, &dst))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -674,6 +1278,29 @@ fn fingerprint_list() -> Result<Vec<fingerprints::LibraryEntry>, String> {
     fingerprints::list_all().map_err(|e| e.to_string())
 }
 
+/// What this machine's GPU can actually do. Cached; `force` re-asks the engine.
+/// Slow on the first call — it starts the engine off-screen — so the UI asks once.
+#[tauri::command]
+async fn gpu_caps(force: bool) -> Result<gpu_caps::HostGlCaps, String> {
+    gpu_caps::probe(force).await.map_err(|e| e.to_string())
+}
+
+/// Whether the machine can wear each library fingerprint, keyed by id. Kept out of
+/// fingerprint_list() so that stays fast; an empty map means "not known", not "all fine".
+#[tauri::command]
+async fn gpu_caps_compat(
+) -> Result<std::collections::HashMap<String, gpu_caps::Compat>, String> {
+    let caps = match gpu_caps::probe(false).await {
+        Ok(c) => c,
+        Err(_) => return Ok(Default::default()),
+    };
+    let entries = fingerprints::list_all().map_err(|e| e.to_string())?;
+    Ok(entries
+        .into_iter()
+        .map(|e| (e.id, gpu_caps::compat(&e.payload, &caps)))
+        .collect())
+}
+
 #[tauri::command]
 fn fingerprint_get(id: String) -> Result<Option<fingerprints::LibraryEntry>, String> {
     fingerprints::get(&id).map_err(|e| e.to_string())
@@ -799,11 +1426,300 @@ fn proxy_bulk_save(entries: Vec<proxy::ProxyEntry>) -> Result<usize, String> {
 
 #[tauri::command]
 async fn launch(profile_id: String) -> Result<u32, String> {
-    // UI launches: no CDP, headed.
-    launch::launch_profile(&profile_id, false, false)
+    // UI launches: no CDP, headed. The bus goes along even with no group so the
+    // page helper has somewhere to report.
+    if migrate::in_progress() {
+        return Err("profiles are being moved — try again when that finishes".into());
+    }
+    let b = bus().await?;
+    launch::launch_profile_synced(&profile_id, false, false, None, b.port, &b.token)
         .await
         .map(|o| o.pid)
         .map_err(|e| e.to_string())
+}
+
+// ---- Window synchronisation ----
+
+/// The synchronisation bus, started lazily and shared: the port stays closed
+/// for a user who never groups profiles.
+static BUS: tokio::sync::OnceCell<std::sync::Arc<sync_bus::Bus>> =
+    tokio::sync::OnceCell::const_new();
+
+pub(crate) async fn bus() -> Result<std::sync::Arc<sync_bus::Bus>, String> {
+    BUS.get_or_try_init(|| async {
+        // Fresh per run: tells a browser this launcher started it rather than
+        // anything else on the machine.
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        sync_bus::Bus::start(token).await.map_err(|e| e.to_string())
+    })
+    .await
+    .cloned()
+}
+
+/// Opens (or re-focuses) the floating control panel for a group. Same bundle,
+/// addressed by hash — a 60px strip does not warrant its own vite entry point.
+fn open_sync_panel(app: &tauri::AppHandle, group: &str) {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(w) = app.get_webview_window("sync-panel") {
+        let _ = w.set_focus();
+        return;
+    }
+    let url = format!("index.html#/?syncPanel={group}");
+    let built = WebviewWindowBuilder::new(app, "sync-panel", WebviewUrl::App(url.into()))
+        .title("ShardX Sync")
+        .inner_size(360.0, 168.0)
+        .resizable(true)
+        .min_inner_size(280.0, 120.0)
+        .resizable(false)
+        .always_on_top(true)
+        .decorations(false)
+        .skip_taskbar(true)
+        .build();
+    if let Err(e) = built {
+        // Not fatal — the group is synchronising, it just has no panel.
+        eprintln!("[launcher] sync panel unavailable: {e}");
+    }
+}
+
+#[tauri::command]
+async fn sync_launch(
+    app: tauri::AppHandle,
+    profile_ids: Vec<String>,
+    group: Option<String>,
+) -> Result<String, String> {
+    if profile_ids.len() < 2 {
+        return Err("a group needs at least two profiles".into());
+    }
+    // A phone profile turns a mirrored mouse press into a touch and a desktop one
+    // does not, so refuse a mixed group before anything is launched.
+    let mut mobile: Vec<String> = Vec::new();
+    let mut desktop: Vec<String> = Vec::new();
+    for id in &profile_ids {
+        let stored = profile::load_raw(id).map_err(|e| format!("{id}: {e}"))?;
+        let name = stored
+            .config
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(id.as_str())
+            .to_string();
+        if profile::claims_mobile(&stored.config) {
+            mobile.push(name);
+        } else {
+            desktop.push(name);
+        }
+    }
+    if !mobile.is_empty() && !desktop.is_empty() {
+        return Err(format!(
+            "a sync group must be all-mobile or all-desktop — mobile: {}; desktop: {}",
+            mobile.join(", "),
+            desktop.join(", ")
+        ));
+    }
+    // Phones of one size only: a handset window IS its screen and cannot be resized,
+    // and a mirrored press carries a fraction of the viewport, so widths must match.
+    if desktop.is_empty() {
+        let mut sizes: Vec<(String, String)> = Vec::new();
+        for id in &profile_ids {
+            let stored = profile::load_raw(id).map_err(|e| format!("{id}: {e}"))?;
+            let name = stored
+                .config
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id.as_str())
+                .to_string();
+            let size = match profile::claimed_screen(&stored.config) {
+                Some((w, h)) => format!("{w}x{h}"),
+                None => "unknown".to_string(),
+            };
+            sizes.push((name, size));
+        }
+        let distinct: std::collections::BTreeSet<&str> =
+            sizes.iter().map(|(_, s)| s.as_str()).collect();
+        if distinct.len() > 1 {
+            let listed: Vec<String> = sizes
+                .iter()
+                .map(|(n, s)| format!("{n} ({s})"))
+                .collect();
+            return Err(format!(
+                "a mobile sync group must be all one screen size — {}",
+                listed.join(", ")
+            ));
+        }
+    }
+    let group = group.unwrap_or_else(|| "fleet".to_string());
+    let b = bus().await?;
+
+    let mut failed: Vec<String> = Vec::new();
+    for id in &profile_ids {
+        if let Err(e) = launch::launch_profile_synced(
+            id, false, false, Some(&group), b.port, &b.token).await {
+            failed.push(format!("{id}: {e}"));
+        }
+    }
+    if failed.len() == profile_ids.len() {
+        return Err(format!("nothing launched — {}", failed.join("; ")));
+    }
+    // A partial launch is still a usable group; just say what did not make it.
+    if !failed.is_empty() {
+        eprintln!("[launcher] sync group '{group}': {} failed — {}",
+                  failed.len(), failed.join("; "));
+    }
+    open_sync_panel(&app, &group);
+    Ok(group)
+}
+
+#[tauri::command]
+async fn sync_status(group: String) -> Result<sync_bus::GroupStatus, String> {
+    Ok(bus().await?.status(&group))
+}
+
+#[tauri::command]
+async fn sync_set_paused(group: String, paused: bool) -> Result<(), String> {
+    bus().await?.set_paused(&group, paused);
+    Ok(())
+}
+
+/// Lays the group's windows out on the primary display's work area — under the
+/// menu bar or behind the dock means moving them by hand anyway.
+#[tauri::command]
+async fn sync_arrange(
+    app: tauri::AppHandle,
+    group: String,
+    layout: sync_bus::Layout,
+) -> Result<(), String> {
+    let monitor = app
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no display".to_string())?;
+    let scale = monitor.scale_factor();
+    let pos = monitor.position().to_logical::<i32>(scale);
+    let size = monitor.size().to_logical::<i32>(scale);
+    // Margin for the menu bar; browsers report logical pixels, as SetBounds wants.
+    let top = if cfg!(target_os = "macos") { 28 } else { 0 };
+    bus().await?.arrange(
+        &group,
+        layout,
+        (pos.x, pos.y + top, size.width, size.height - top),
+    );
+    Ok(())
+}
+
+/// Asks every window in the group to close; the panel goes with them.
+#[tauri::command]
+async fn sync_stop(group: String) -> Result<(), String> {
+    bus().await?.stop(&group);
+    Ok(())
+}
+
+/// Holds one profile out of the group — a captcha, a different password.
+#[tauri::command]
+async fn sync_set_excluded(
+    group: String,
+    profile: String,
+    excluded: bool,
+) -> Result<(), String> {
+    bus().await?.set_excluded(&group, &profile, excluded);
+    Ok(())
+}
+
+/// Every profile whose current page has something the helper could fill.
+#[tauri::command]
+async fn helper_profiles() -> Result<Vec<String>, String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    if !s.helper_enabled {
+        return Ok(Vec::new());
+    }
+    Ok(bus().await?.helper_profiles(&s.helper_triggers))
+}
+
+/// What the helper found in one profile.
+#[tauri::command]
+async fn helper_fields(profile: String) -> Result<serde_json::Value, String> {
+    Ok(bus()
+        .await?
+        .helper_fields(&profile)
+        .unwrap_or(serde_json::Value::Null))
+}
+
+/// The operator accepted the offer; nothing fills without this. In a group every
+/// member fills with its own person — the command travels, the data does not.
+#[tauri::command]
+async fn helper_fill(profile: String) -> Result<usize, String> {
+    let b = bus().await?;
+    match b.group_of(&profile) {
+        Some(group) => Ok(b.fill_group(&group)),
+        None => {
+            b.fill(&profile);
+            Ok(1)
+        }
+    }
+}
+
+/// Opens (or re-focuses) the helper panel for one profile.
+fn open_helper_panel(app: &tauri::AppHandle, profile: &str) {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    if let Some(w) = app.get_webview_window("helper-panel") {
+        let _ = w.set_focus();
+        return;
+    }
+    let url = format!("index.html#/?helperPanel={profile}");
+    if let Err(e) = WebviewWindowBuilder::new(app, "helper-panel", WebviewUrl::App(url.into()))
+        .title("Shard Helper")
+        .inner_size(300.0, 150.0)
+        .resizable(false)
+        .always_on_top(true)
+        .decorations(false)
+        .skip_taskbar(true)
+        // Unfocused: it appears mid-form, and stealing the keyboard then is
+        // worse than not appearing.
+        .focused(false)
+        .build()
+    {
+        eprintln!("[launcher] helper panel unavailable: {e}");
+    }
+}
+
+/// `async` is load-bearing. A sync command runs on the main thread, and building
+/// a webview there deadlocks on Windows: WebView2 needs the message loop this
+/// command is sitting on, so the panel comes up white and the whole launcher
+/// stops answering. An async command runs off that thread and the builder hands
+/// the work to the loop properly.
+#[tauri::command]
+async fn helper_show(app: tauri::AppHandle, profile: String) -> Result<(), String> {
+    open_helper_panel(&app, &profile);
+    Ok(())
+}
+
+#[tauri::command]
+fn helper_close(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("helper-panel") {
+        let _ = w.close();
+    }
+    Ok(())
+}
+
+/// The operator closed the panel themselves — a refusal about this page.
+/// `helper_close` is the other case: the page moved on, which silences nothing.
+#[tauri::command]
+async fn helper_dismiss(app: tauri::AppHandle, profile: String) -> Result<(), String> {
+    use tauri::Manager;
+    bus().await?.helper_dismiss(&profile);
+    if let Some(w) = app.get_webview_window("helper-panel") {
+        let _ = w.close();
+    }
+    Ok(())
+}
+
+/// Closes the floating panel; the panel calls it once the group is empty.
+#[tauri::command]
+fn sync_close_panel(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("sync-panel") {
+        let _ = w.close();
+    }
+    Ok(())
 }
 
 // ---- Cookies ----
@@ -846,8 +1762,55 @@ fn settings_get() -> Result<settings::Settings, String> {
     settings::load().map_err(|e| e.to_string())
 }
 
+/// The primary monitor in CSS pixels, so the editor can offer resolutions and
+/// refuse the ones this machine cannot actually show. None when there is no
+/// monitor to ask (headless), and the editor then offers the full list.
 #[tauri::command]
-fn settings_save(value: settings::Settings) -> Result<(), String> {
+fn host_screen(window: tauri::WebviewWindow) -> Option<(i64, i64)> {
+    let monitor = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten())?;
+    let scale = monitor.scale_factor();
+    if scale <= 0.0 {
+        return None;
+    }
+    let phys = monitor.size();
+    let w = (phys.width as f64 / scale).round() as i64;
+    let h = (phys.height as f64 / scale).round() as i64;
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Why the settings file could not be read, for the banner. None = it reads fine.
+#[tauri::command]
+fn settings_load_error() -> Option<String> {
+    settings::load_error()
+}
+
+#[tauri::command]
+fn settings_save(mut value: settings::Settings) -> Result<(), String> {
+    // Saving on top of a file we could not read would write the defaults this
+    // form was filled from over whatever the file actually held — the data
+    // root among them, which is where every profile lives. The banner says
+    // the file was not read; until it is fixed or moved aside, nothing here
+    // gets written.
+    if let Some(err) = settings::load_error() {
+        return Err(format!(
+            "Settings were not saved: the file could not be read, so what is on \
+             screen are defaults, not your settings. Writing them would lose \
+             whatever the file holds — including where your profiles live. Fix \
+             or delete it first. ({err})"
+        ));
+    }
+    // Owned by the migration, not the form — which round-trips the whole struct
+    // and would reset it while the data sits on another disk.
+    if let Ok(cur) = settings::load() {
+        value.data_root = cur.data_root;
+        if value.api_secret.is_empty() {
+            value.api_secret = cur.api_secret;
+        }
+    }
     settings::save(&value).map_err(|e| e.to_string())
 }
 
@@ -885,6 +1848,8 @@ fn portable_status() -> Result<PortableStatus, String> {
 /// the drive together and relaunches.
 #[tauri::command]
 async fn portable_enable() -> Result<String, String> {
+    let _gate = sequential::launch_gate().lock().await;
+    if sequential::active() { return Err("stop sequential automation before copying data".into()); }
     tauri::async_runtime::spawn_blocking(portable::enable)
         .await
         .map_err(|e| e.to_string())?
@@ -910,6 +1875,7 @@ async fn portable_clear_local_cache() -> Result<Option<String>, String> {
 /// `app_quit` once it resolves.
 #[tauri::command]
 async fn portable_safe_close(window: tauri::Window) -> Result<(), String> {
+    sequential::stop_and_wait().await.map_err(|e| e.to_string())?;
     use tauri::Emitter;
 
     let running: Vec<String> = process::Tracker::shared()
@@ -957,8 +1923,10 @@ async fn portable_safe_close(window: tauri::Window) -> Result<(), String> {
 /// Quit the launcher outright (bypasses minimize-to-tray). Used by the
 /// Safe-close dialog's Quit button.
 #[tauri::command]
-fn app_quit(app: tauri::AppHandle) {
+async fn app_quit(app: tauri::AppHandle) -> Result<(), String> {
+    sequential::stop_and_wait().await.map_err(|e| e.to_string())?;
     app.exit(0);
+    Ok(())
 }
 
 // ---- Automation API ----
@@ -1069,6 +2037,26 @@ async fn ps_products() -> Result<Value, String> {
 #[tauri::command]
 async fn ps_available_count() -> Result<Value, String> {
     psapi::call("GET", "/user/api/proxies/available-count", &[], None)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn ps_resi_isps(
+    tier: String,
+    country: String,
+    region: String,
+    city: String,
+) -> Result<Value, String> {
+    // Registered in every configuration — the handler list is one literal and
+    // cannot be gated per entry — so say so when the code behind it is absent.
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (tier, country, region, city);
+        return Err("this build has no ProxyShard support".into());
+    }
+    #[cfg(feature = "automation")]
+    psapi::resi_isps(&tier, &country, &region, &city)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1242,6 +2230,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if sequential::active() {
+                    api.prevent_close();
+                    use tauri::Manager;
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move { if let Err(e) = app_quit(app).await { notify_warning(e); } });
+                    return;
+                }
                 let to_tray = settings::load().map(|s| s.minimize_to_tray).unwrap_or(true);
                 if window.label() == "main" && to_tray {
                     api.prevent_close();
@@ -1250,10 +2245,64 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            sync_launch,
+            sync_status,
+            sync_set_paused,
+            sync_arrange,
+            sync_stop,
+            sync_set_excluded,
+            sync_close_panel,
+            helper_profiles,
+            helper_fields,
+            helper_fill,
+            helper_show,
+            helper_close,
+            helper_dismiss,
             profile_list,
             profile_get,
             profile_save,
             profile_delete,
+            automation_available,
+            automation_list,
+            automation_create,
+            automation_save,
+            automation_delete,
+            automation_duplicate,
+            automation_launch,
+            automation_attach,
+            automation_detach,
+            automation_attached,
+            automation_screencast,
+            automation_call,
+            automation_pick,
+            automation_run,
+            automation_run_stop,
+            automation_run_status,
+            automation_fleet,
+            automation_fleet_window,
+            automation_display,
+            automation_tls_fingerprints,
+            automation_modules,
+            automation_module_install,
+            automation_module_remove,
+            automation_module_permissions,
+            automation_module_grant,
+            automation_modules_dir,
+            automation_export,
+            automation_import,
+            trash_list,
+            trash_restore,
+            trash_purge,
+            trash_empty,
+            extension_list,
+            extension_import,
+            extension_import_url,
+            extension_delete,
+            bookmark_list,
+            bookmark_save,
+            bookmark_delete,
+            data_root_get,
+            data_root_migrate,
             profile_bind_proxy,
             profile_clone,
             profile_import,
@@ -1267,6 +2316,8 @@ pub fn run() {
             profile_create_from_template,
             enrich_picks_for_preset,
             fingerprint_list,
+            gpu_caps,
+            gpu_caps_compat,
             fingerprint_get,
             fingerprint_import,
             fingerprint_delete,
@@ -1289,11 +2340,16 @@ pub fn run() {
             launch,
             settings_get,
             settings_save,
+            sequential::sequential_start,
+            sequential::sequential_stop,
+            sequential::sequential_status,
             portable_status,
             portable_enable,
             portable_clear_local_cache,
             portable_safe_close,
             app_quit,
+            settings_load_error,
+            host_screen,
             api_info,
             api_regenerate_token,
             ps_get_key,
@@ -1305,6 +2361,7 @@ pub fn run() {
             ps_import_order,
             ps_products,
             ps_available_count,
+            ps_resi_isps,
             ps_calculate,
             ps_purchase,
             ps_add_bandwidth,
@@ -1346,14 +2403,22 @@ pub fn run() {
                 let quit = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show, &quit])?;
                 if let Some(icon) = app.default_window_icon().cloned() {
-                    TrayIconBuilder::with_id("main")
-                        .icon(icon)
+                    let builder = TrayIconBuilder::with_id("main").icon(icon);
+                    // The macOS menu bar wants a stencil: drawn from the icon's
+                    // shape alone, so it is dark on a light bar and light on a
+                    // dark one instead of staying purple in both.
+                    #[cfg(target_os = "macos")]
+                    let builder = builder.icon_as_template(true);
+                    builder
                         .tooltip("ShardX Launcher")
                         .menu(&menu)
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
                             "tray_show" => show_main_window(app),
-                            "tray_quit" => app.exit(0),
+                            "tray_quit" => {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move { if let Err(e) = app_quit(app).await { notify_warning(e); } });
+                            },
                             _ => {}
                         })
                         .on_tray_icon_event(|tray, e| {
@@ -1384,6 +2449,21 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 runtime::ensure_profiles_migrated().await;
             });
+
+            // Point the heavy directories wherever the operator moved them,
+            // before anything reads a profile.
+            if let Ok(s) = settings::load() {
+                if let Some(root) = s.data_root.as_deref().filter(|r| !r.is_empty()) {
+                    store::set_data_root(Some(std::path::PathBuf::from(root)));
+                }
+            }
+
+            // Trash older than its week.
+            match trash::purge_expired() {
+                Ok(n) if n > 0 => eprintln!("[launcher] trash: {n} expired profile(s) removed"),
+                Ok(_) => {}
+                Err(e) => eprintln!("[launcher] trash sweep failed: {e}"),
+            }
 
             // Clean up temporary profiles from crashed runs.
             match profile::purge_temporary() {

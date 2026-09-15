@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, ProgressBar, SegmentControl } from "@proxyshard/shardx-ui-kit";
 import { AddIcon } from "../../../shared/icons";
+import { useT } from "../../../shared/i18n";
 import { toast } from "../../../shared/model/toast";
 import { fmtGB } from "../../../shared/lib/utils";
 import type { PsOrder, ResiType } from "../../../entities/proxyshard";
@@ -21,6 +22,7 @@ function TrafficStat({ value, label }: { value: string; label: string }) {
 /// traffic for Standard/Premium, in-place top-up, and the relay proxy
 /// generator. Unmetered is a flat plan, so it skips the GB meter.
 export function PsResidentialCard() {
+  const t = useT();
   const [type, setType] = useState<ResiType>("standart");
   const [data, setData] = useState<{ data: number; data_remain: number; data_spent: number } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -57,7 +59,7 @@ export function PsResidentialCard() {
     setRenewing(true);
     try {
       await psRenew(order.order_id);
-      toast.ok(`Renewed order #${order.order_id}`);
+      toast.ok(t("psResidentialCard.renewedOrder", { id: order.order_id }));
       loadOrders();
     } catch (e) { toast.err(String(e)); }
     finally { setRenewing(false); }
@@ -67,14 +69,14 @@ export function PsResidentialCard() {
   return (
     <div className="mb-3.5 rounded-lg bg-bg-white-0 p-[18px] shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
       <div className="mb-2.5 flex items-center justify-between gap-3">
-        <h3 className="m-0 text-label-sm text-text-strong-950">Residential</h3>
+        <h3 className="m-0 text-label-sm text-text-strong-950">{t("psResidentialCard.title")}</h3>
         <SegmentControl
           size="small"
           value={type}
           items={[
-            { value: "standart", label: "Standard" },
-            { value: "premium", label: "Premium" },
-            { value: "unmetered", label: "Unmetered" },
+            { value: "standart", label: t("psResidentialCard.tierStandard") },
+            { value: "premium", label: t("psResidentialCard.tierPremium") },
+            { value: "unmetered", label: t("psResidentialCard.tierUnmetered") },
           ]}
           onChange={(v) => setType(v as ResiType)}
         />
@@ -82,23 +84,25 @@ export function PsResidentialCard() {
 
       {type !== "unmetered" ? (
         <>
-          {loading && <p className="m-0 text-paragraph-xs text-text-soft-400">Loading…</p>}
+          {loading && <p className="m-0 text-paragraph-xs text-text-soft-400">{t("psResidentialCard.loading")}</p>}
           {err && !loading && <p className="m-0 text-paragraph-xs text-text-soft-400">{err}</p>}
           {data && !loading && (
             <>
               <div className="my-1 mb-3 grid grid-cols-3 gap-2.5">
-                <TrafficStat value={fmtGB(data.data_remain)} label="Remaining" />
-                <TrafficStat value={fmtGB(data.data_spent)} label="Used" />
-                <TrafficStat value={fmtGB(data.data)} label="Total" />
+                <TrafficStat value={fmtGB(data.data_remain)} label={t("psResidentialCard.remaining")} />
+                <TrafficStat value={fmtGB(data.data_spent)} label={t("psResidentialCard.used")} />
+                <TrafficStat value={fmtGB(data.data)} label={t("psResidentialCard.total")} />
               </div>
               <ProgressBar value={pct} color={pct > 90 ? "error" : pct > 70 ? "warning" : "primary"} />
-              <p className="m-0 mt-1 text-paragraph-xs text-text-soft-400">{pct}% used.</p>
+              <p className="m-0 mt-1 text-paragraph-xs text-text-soft-400">{t("psResidentialCard.percentUsed", { pct })}</p>
             </>
           )}
         </>
       ) : (
         <p className="m-0 text-paragraph-xs text-text-soft-400">
-          Unlimited plan{order?.expires_at ? ` · expires ${order.expires_at.slice(0, 10)}` : ""}.
+          {order?.expires_at
+            ? t("psResidentialCard.unlimitedPlanExpires", { date: order.expires_at.slice(0, 10) })
+            : t("psResidentialCard.unlimitedPlan")}
         </p>
       )}
 
@@ -110,10 +114,10 @@ export function PsResidentialCard() {
             size="small"
             leftIcon={<AddIcon className="size-4" />}
             disabled={!order}
-            title={order ? undefined : "No residential order found for this tier"}
+            title={order ? undefined : t("psResidentialCard.noResiOrderHint")}
             onClick={() => order && setTopup(order)}
           >
-            Add traffic
+            {t("psResidentialCard.addTraffic")}
           </Button>
         ) : (
           <Button
@@ -122,14 +126,14 @@ export function PsResidentialCard() {
             size="small"
             disabled={!order || renewing}
             isLoading={renewing}
-            title={order ? undefined : "No unmetered order found"}
+            title={order ? undefined : t("psResidentialCard.noUnmeteredOrderHint")}
             onClick={renew}
           >
-            {renewing ? "Renewing…" : "Renew"}
+            {renewing ? t("psResidentialCard.renewing") : t("psResidentialCard.renew")}
           </Button>
         )}
         <Button variant="primary" mode="filled" size="small" onClick={() => setGenOpen(true)}>
-          Generate proxies
+          {t("psResidentialCard.generateProxies")}
         </Button>
       </div>
 

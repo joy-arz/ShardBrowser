@@ -2,9 +2,11 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Alert, ProgressBar } from "@proxyshard/shardx-ui-kit";
+import { useT } from "../../shared/i18n";
 import type { RtStatus, RtProgress } from "../../shared/types";
 
 export function FirstRunGate({ children }: { children: ReactNode }) {
+  const t = useT();
   // null = querying backend; true = reveal; false = show overlay.
   const [installed, setInstalled] = useState<boolean | null>(null);
   const [prog, setProg] = useState<RtProgress | null>(null);
@@ -120,10 +122,11 @@ export function FirstRunGate({ children }: { children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-1000 flex items-center justify-center bg-bg-weak-50 text-text-strong-950">
       <div className="w-[460px] px-9 py-8 text-center">
-        <div className="mb-2 text-title-h6">Setting up ShardX browser</div>
+        <div className="mb-2 text-title-h6">{t("firstRunGate.title")}</div>
         <div className="mb-6 text-paragraph-xs text-text-soft-400">
-          First-run download from our CDN. Done once per install
-          (~{prog?.total ? fmt(prog.total) : "150 MB"}).
+          {t("firstRunGate.downloadNote", {
+            size: prog?.total ? fmt(prog.total) : "150 MB",
+          })}
         </div>
 
         {portable && (
@@ -140,13 +143,13 @@ export function FirstRunGate({ children }: { children: ReactNode }) {
               {prog.label} —{" "}
               {prog.phase === "download"
                 ? `${fmt(prog.received)} / ${fmt(prog.total)}  (${prog.percent}%)`
-                : "extracting…"}
+                : t("firstRunGate.extracting")}
             </div>
             <ProgressBar value={prog.percent} color="primary" />
           </>
         )}
         {!prog && !err && (
-          <div className="text-paragraph-xs text-text-soft-400">Contacting CDN…</div>
+          <div className="text-paragraph-xs text-text-soft-400">{t("firstRunGate.contactingCdn")}</div>
         )}
         {err && (
           <Alert status="error" variant="light" className="mt-3 text-left">

@@ -1,6 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Badge from "../../../shared/ui/Badge";
 import { UDP_DOCS_URL } from "../../../shared/lib/utils";
+import { useT } from "../../../shared/i18n";
 import type { ProxyEntry, ProxyTestSnapshot } from "../model/types";
 
 export function ProxyTestResult({ snap, kind, busy }: {
@@ -8,8 +9,9 @@ export function ProxyTestResult({ snap, kind, busy }: {
   kind: ProxyEntry["kind"];
   busy: boolean;
 }) {
-  if (busy) return <span className="text-paragraph-xs text-text-soft-400">testing…</span>;
-  if (!snap) return <span className="text-paragraph-xs text-text-soft-400">not tested</span>;
+  const t = useT();
+  if (busy) return <span className="text-paragraph-xs text-text-soft-400">{t("proxyTestResult.testing")}</span>;
+  if (!snap) return <span className="text-paragraph-xs text-text-soft-400">{t("proxyTestResult.notTested")}</span>;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -18,9 +20,9 @@ export function ProxyTestResult({ snap, kind, busy }: {
         variant='filled'
         size="small"
         dot
-        title={snap.tcp_ms != null ? `TCP ${snap.tcp_ms} ms` : "TCP failed"}
+        title={snap.tcp_ms != null ? t("proxyTestResult.tcpOkTitle", { ms: snap.tcp_ms }) : t("proxyTestResult.tcpFailedTitle")}
       >
-        {snap.tcp_ms != null ? "Active" : "Failed"}
+        {snap.tcp_ms != null ? t("proxyTestResult.active") : t("proxyTestResult.failed")}
       </Badge>
       {/* UDP pill: clickable to docs explaining what the presence/absence of
           UDP means for QUIC + WebRTC. HTTP proxies never have UDP, but the
@@ -29,7 +31,7 @@ export function ProxyTestResult({ snap, kind, busy }: {
         <button
           type="button"
           className="cursor-pointer flex items-center border-0 bg-transparent p-0 transition-[filter,transform] hover:brightness-110 active:translate-y-px"
-          title={`UDP relay works (${snap.udp_ms} ms) — QUIC enabled at launch. Click for docs.`}
+          title={t("proxyTestResult.udpOkTitle", { ms: snap.udp_ms })}
           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => { }); }}
         >
           <Badge color="primary" variant='filled' size="small">UDP</Badge>
@@ -39,7 +41,7 @@ export function ProxyTestResult({ snap, kind, busy }: {
         <button
           type="button"
           className="status-pill-no-udp relative flex items-center cursor-pointer rounded-full border-0 bg-transparent p-0 transition-[filter,transform] hover:brightness-110 active:translate-y-px"
-          title="No UDP support — QUIC/HTTP-3 disabled at launch. Click for docs."
+          title={t("proxyTestResult.noUdpTitle")}
           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => { }); }}
         >
           <Badge color="error" variant='filled' size="small">UDP</Badge>

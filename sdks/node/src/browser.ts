@@ -63,6 +63,8 @@ export interface LaunchOptions {
   cdp?: boolean;
   headless?: boolean;
   extraArgs?: string[];
+  /** Claim the protected-video support a phone has. Mobile profiles only. */
+  androidMedia?: boolean;
   env?: Record<string, string>;
   webrtc?: WebRtcMode;
   webrtcPublicIp?: string;
@@ -149,7 +151,12 @@ export class Browser {
       `--user-data-dir=${udd}`,
       "--no-first-run",
     ];
-    if (!profile.hasWebGPU) argv.push("--disable-features=WebGPU");
+    // A Linux profile keeps navigator.gpu and answers the adapter request with
+    // nothing, as Chrome on Linux does; the switch would remove the object too.
+    if (!profile.hasWebGPU && !profile.claimsLinuxDesktop)
+      argv.push("--disable-features=WebGPU");
+    if (opts.androidMedia && profile.claimsMobile)
+      argv.push("--shardx-android-media");
     if (!opts.headless && !opts.cdp) {
       argv.push("--restore-last-session", "--hide-crash-restore-bubble");
     }
