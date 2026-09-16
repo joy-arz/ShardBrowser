@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
-  <a href="https://github.com/ProxyShard/ShardBrowser/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ProxyShard/ShardBrowser?style=flat-square&logo=github&label=release&color=blueviolet"></a>
+  <a href="https://github.com/joy-arz/ShardBrowser/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/joy-arz/ShardBrowser?style=flat-square&logo=github&label=release&color=blueviolet"></a>
   <a href="https://github.com/ProxyShard/ShardBrowser/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ProxyShard/ShardBrowser?style=flat-square&logo=github&label=stars&color=lightgrey"></a>
   <a href="https://github.com/ProxyShard/ShardBrowser/commits"><img alt="Last commit" src="https://img.shields.io/github/last-commit/ProxyShard/ShardBrowser?style=flat-square&color=success"></a>
 </p>
@@ -35,6 +35,25 @@
   <a href="#quick-start">Install</a> ·
   <a href="#usage">Usage</a>
 </p>
+
+## Portable fork
+
+This is **[joy-arz/ShardBrowser](https://github.com/joy-arz/ShardBrowser)**, a
+Windows-focused portable fork of [ProxyShard/ShardBrowser](https://github.com/ProxyShard/ShardBrowser).
+It preserves upstream features and adds USB profile storage, a local-cache toggle,
+Safe close, and native sequential website automation.
+
+**Release target: `v2.0.3-portable.1`** — upstream v2.0.3 integration, sequential
+automation, and the Windows test-executable manifest fix. Follow the
+[release build](https://github.com/joy-arz/ShardBrowser/actions/runs/35048209158);
+packages appear in [this fork's releases](https://github.com/joy-arz/ShardBrowser/releases)
+after the build succeeds. For Windows USB use, download
+**`ShardX-Launcher-portable-win-x64.zip`** and extract the whole folder.
+The executable needs the bundled WebView2 folder beside it.
+
+- [Portable setup and storage](#portable-mode-usb-drive)
+- [Sequential website automation](#sequential-profile-website-automation)
+- [Build from source](SETUP.md)
 
 ShardX is built by the **[ProxyShard](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)** team.
 ProxyShard provides full **SOCKS5 UDP relay** support (RFC 1928 §7) and
@@ -415,8 +434,10 @@ sessions even when the initial public checks passed:
 ### Option A: download a release
 
 Download the build for your OS from [GitHub Releases](../../releases),
-then run it. Use `.dmg` for macOS, `.msi` or the portable `.exe` for
-Windows, and `.AppImage` or `.deb` for Linux.
+then run it. Use `.dmg` for macOS, `.msi` / `-setup.exe` for a Windows
+installation, or `ShardX-Launcher-portable-win-x64.zip` for Windows USB use.
+Extract the entire portable ZIP; the EXE alone does not include WebView2.
+Use `.AppImage` or `.deb` for Linux.
 
 The release is not code-signed with Apple Developer ID or Authenticode,
 so the operating system may show a warning on first launch:
@@ -451,10 +472,11 @@ sudo apt install -y \
 
 ### Option B: build from source
 
-Run these commands from the repository root:
+Use Node.js 22 and Rust 1.98 or newer, plus the platform prerequisites in
+[SETUP.md](SETUP.md). Run these commands from the repository root:
 
 ```bash
-npm install
+npm ci
 npm run tauri dev      # dev (hot reload)
 # or
 npm run tauri build    # release .app / .msi / .AppImage in src-tauri/target/release/bundle/
@@ -478,46 +500,80 @@ and you're ready to bind a proxy and launch your first profile.
 
 ## Portable Mode (USB drive)
 
-*Windows-focused, opt-in, off by default.* Carry your entire setup — profiles,
-cookies, saved logins, proxy lists, fingerprint assignments and settings — on a
-USB drive and run it from any PC, leaving nothing behind.
+*Windows-focused, opt-in, off by default.* Profiles, cookies, saved login data,
+proxies, fingerprint assignments and settings travel in `ShardXData` on your USB.
+The browser engine and, by default, disposable disk cache stay on each PC.
 
-**Get the right download:** use `ShardX-Launcher-portable-win-x64.zip` from the
-[releases](../../releases) — it bundles its own WebView2 runtime, so it runs on a
-bare PC with nothing to install. Unzip it and keep the folder intact (the exe
-next to its `Microsoft.WebView2.FixedVersionRuntime.*` folder).
+### Set up once
 
-**Turn it on:** *Settings → Portable Mode → "Make this install portable"*. The
-launcher creates a `ShardXData` folder next to the executable and copies your
-current data into it. Quit, move the **whole folder** (exe + WebView2 runtime +
-`ShardXData`) to your drive, and relaunch from the drive. A **PORTABLE** badge
-appears in the title bar. Removing / renaming `ShardXData` reverts to a normal
-install — the presence of the folder *is* the switch.
+1. Download **`ShardX-Launcher-portable-win-x64.zip`** from
+   [this fork's releases](https://github.com/joy-arz/ShardBrowser/releases) and
+   extract it. Keep the EXE and `Microsoft.WebView2.FixedVersionRuntime.*` together.
+2. Close all browser profiles. Open **Settings → Portable Mode → Make this install portable**.
+   This copies existing user data into `ShardXData` beside the executable.
+3. Quit, move the **whole folder**—EXE, WebView2 runtime and `ShardXData`—to the USB,
+   then relaunch from the drive. Check the **PORTABLE** badge and Settings data path.
 
-**What travels, and what stays per-PC:**
+**Do this once, not after every change.** While Portable Mode is active, the app
+and browser write to `ShardXData` directly. It does not copy the whole profile to
+the PC and copy it back on exit. Settings changes still require **Save settings**;
+close browsers cleanly so pending session writes finish.
 
-| | Travels with the drive? | Why |
-|---|---|---|
-| Profiles, cookies, logins, proxies, settings, fingerprint assignments | **Yes** — in `ShardXData\` | the point of Portable Mode |
-| Downloaded browser engine (~150 MB Chromium + Widevine) | **No** — stays in `%APPDATA%\shardx-launcher\runtime\` on each PC | large and machine-specific; re-downloading on every move would be miserable. Each PC fetches it once. |
-| Browser disk cache (network / code cache) | **No, by default** — goes to `%LOCALAPPDATA%\ShardXLocalCache\` on the current PC | this is the constant small-random-write churn that USB flash is slow at; keeping it on the local disk is what removes the lag. It's disposable — losing it costs nothing. |
+### Storage and cache
 
-This is the same split **Firefox Portable** makes with its local-cache option:
-the durable profile travels, the fast-moving cache stays on the machine you're
-using.
+| Data | Location in Portable Mode |
+|---|---|
+| Profiles, cookies, saved login data, proxies, settings, fingerprint assignments | `ShardXData` on the USB |
+| Downloaded Chromium engine and runtime components | Per-machine runtime location; each new PC needs its own first-run download |
+| Chromium disk cache, with local cache ON (default) | `%LOCALAPPDATA%\ShardXLocalCache\<profile-id>` on this PC |
+| Chromium disk cache, with local cache OFF | Under the profile on the USB |
 
-**Local-cache toggle:** *Settings → Portable Mode → "Use local cache for speed"*
-(default **ON**). ON = fast, cache on the host PC, not portable (the
-`ShardXLocalCache` folder is safe to delete anytime). OFF = everything including
-cache stays in `ShardXData` on the drive — fully self-contained, but slower on
-typical USB 2.0/3.0 flash. Only Chromium's main `--disk-cache-dir` is redirected;
-the small GPU/shader cache stays on the drive (the engine exposes no separate
-documented switch for it, and it isn't the bottleneck).
+**Settings → Portable Mode → Use local cache for speed** controls the cache
+location on the next profile launch after saving. Keeping disposable cache on the
+local disk reduces small random writes to slow USB flash. It is left on the PC;
+use **Clear local cache (this PC)** after closing profiles when you want to remove it.
+Turning the toggle off keeps the disk cache on the drive, but does not move the
+engine onto the USB or guarantee no traces on the host computer.
 
-**Note:** using one `ShardXData` from two machines at once (shared/synced live)
-isn't supported — the profile databases will clash. Move the drive, don't fork it.
+Only `--disk-cache-dir` is redirected. Other browser storage, including GPU/shader
+and service-worker storage, may remain in the profile. The USB can still fill up
+with profile data and downloads; local cache is not a storage limit.
+
+### Close and move safely
+
+Use **Safe close**, wait for completion, quit the app, then safely eject the drive
+in Windows. This closes profiles and finishes the launcher's shutdown steps; it
+is not a whole-profile transfer operation. Use the same data on **one PC at a time**.
+
+Profile files travel with the drive, but websites can expire sessions or require
+another login. Cross-PC account sign-in and last-tab restoration are not guaranteed.
+Keep a backup of `ShardXData` made while all profiles are closed.
 
 Full details: [PORTABLE_MODE.md](PORTABLE_MODE.md).
+
+## Sequential profile website automation
+
+Open **Automation → Sequential website automation**:
+
+1. Select numeric profile names, such as `001` through `050`.
+2. Enter the website URL and wait time (default **15 seconds**).
+3. Choose **Start automation**.
+
+Each existing profile starts, connects through CDP, opens the URL, waits for page
+readiness, waits the chosen duration, and stops before the next profile starts.
+Names resolve to their internal profile IDs; no separate profile store is created.
+
+Progress and per-profile results appear in the card. **Stop** cancels the batch
+and closes its active profile. Missing or failed profiles are recorded and skipped
+after cleanup. If shutdown cannot be confirmed, the batch halts; use Stop again
+to retry cleanup. Pause/Resume are not implemented.
+
+Portable storage and the local-cache preference apply to these profiles too.
+See [SEQUENTIAL_AUTOMATION.md](SEQUENTIAL_AUTOMATION.md) for timeouts and test details.
+The Windows, macOS, Linux and frontend checks passed for the release source in
+[this CI run](https://github.com/joy-arz/ShardBrowser/actions/runs/35021581239).
+The 50-profile sequence is covered by mocked lifecycle tests; real-browser checks
+used two disposable profiles on macOS, not a physical Windows USB transfer.
 
 ---
 
@@ -899,7 +955,3 @@ permitted**:
 Permitted uses include personal projects, web scraping,
 multi-accounting and integration with the launcher's automation API.
 Contact us before building a commercial product on top of the engine.
-
-## Sequential profile website automation (fork feature)
-
-Run numbered profiles one at a time from the Automation page, with a configurable URL and wait, progress, and cancellation. See [SEQUENTIAL_AUTOMATION.md](SEQUENTIAL_AUTOMATION.md) for usage, upstream integration, and testing.

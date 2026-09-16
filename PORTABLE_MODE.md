@@ -2,8 +2,8 @@
 
 Portable Mode lets you carry your whole ShardX setup — profiles, cookies, saved
 logins, proxy lists, fingerprint assignments and app settings — on a USB drive
-and use it from any Windows PC, without leaving anything behind on the machines
-you plug into.
+and use it on another compatible Windows PC. The engine and, by default,
+disposable disk cache stay on each PC; Portable Mode is not a zero-footprint mode.
 
 It is **opt-in** and **off by default**. An install that never enables it behaves
 exactly as it always has.
@@ -71,17 +71,17 @@ machine you're currently sitting at.
   data loss; the launcher leaves it in place for Windows / you to clean up when
   convenient.
 * **OFF**: everything, cache included, stays inside `ShardXData` on the drive.
-  Fully self-contained — nothing is written to the host PC at all — but noticeably
-  slower on typical USB 2.0 / 3.0 flash drives.
+  This can be slower on USB flash. The engine still stays per-machine, and
+  disabling local cache does not guarantee that no traces remain on the host.
 
 The setting itself lives in `ShardXData\settings.json`, so it travels with the
 drive as a preference ("I want the fast path wherever I plug in"). It's applied
 the next time you launch a profile after pressing **Save settings**.
 
 Only Chromium's main disk cache is redirected (via its `--disk-cache-dir` flag).
-The much smaller GPU/shader cache stays under the profile folder on the drive —
-the shipped engine exposes no separate, documented switch to move it, and
-`--disk-cache-dir` covers the part that actually causes the lag.
+GPU/shader caches and service-worker storage may remain under the profile folder.
+No separate GPU-cache flag is used; local disk cache reduces USB writes but does
+not eliminate them.
 
 ---
 
@@ -111,3 +111,8 @@ current — so the indicator is always visible while it's on.
 * **Drive letter / path changes are fine.** Detection is relative to the
   executable, so it doesn't matter whether the drive mounts as `E:` on one PC and
   `F:` on another.
+
+After setup, changes are written directly to `ShardXData`; do not repeat Make
+Portable. Save Settings changes, then use **Safe close**, wait, quit and safely
+eject before moving the drive. Websites may expire sessions or require another
+login, so cross-PC sign-in and tab restoration are not guaranteed.
