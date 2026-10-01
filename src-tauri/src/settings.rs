@@ -110,7 +110,7 @@ fn defaults() -> Settings {
 /// -Encoding UTF8` puts a byte-order mark in front of UTF-8, and a plain `>`
 /// redirect writes UTF-16 — both of which used to be a parse failure, and a
 /// parse failure used to reset every setting.
-fn decode_text(bytes: &[u8]) -> String {
+pub(crate) fn decode_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
         let big_endian = bytes[0] == 0xFE;
         let units: Vec<u16> = bytes[2..]

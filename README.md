@@ -43,9 +43,10 @@ Windows-focused portable fork of [ProxyShard/ShardBrowser](https://github.com/Pr
 It preserves upstream features and adds USB profile storage, a local-cache toggle,
 Safe close, and native sequential website automation.
 
-**Release target: `v2.0.3-portable.1`** — upstream v2.0.3 integration, sequential
-automation, and the Windows test-executable manifest fix. Follow the
-[release build](https://github.com/joy-arz/ShardBrowser/actions/runs/35048209158);
+**Release target: `v2.0.3-portable.2`** — adds **Move to this PC** beside Safe close,
+with verified profile copies, local-data backups and Windows login-key migration.
+Includes upstream v2.0.3 and sequential automation. Follow the
+[release builds](https://github.com/joy-arz/ShardBrowser/actions/workflows/release.yml);
 packages appear in [this fork's releases](https://github.com/joy-arz/ShardBrowser/releases)
 after the build succeeds. For Windows USB use, download
 **`ShardX-Launcher-portable-win-x64.zip`** and extract the whole folder.
@@ -538,6 +539,26 @@ engine onto the USB or guarantee no traces on the host computer.
 Only `--disk-cache-dir` is redirected. Other browser storage, including GPU/shader
 and service-worker storage, may remain in the profile. The USB can still fill up
 with profile data and downloads; local cache is not a storage limit.
+
+### Stop using Portable Mode: move to this PC
+
+On Windows, choose **Move to this PC** beside **Safe close** in the title bar.
+The dialog shows the application and data destinations before you confirm.
+Stop any other automation projects first; the action closes browser profiles and
+stops sequential automation itself.
+
+The launcher copies itself and bundled WebView2 to
+`%LOCALAPPDATA%\Programs\ShardX Launcher Local`, and all `ShardXData` contents to
+`%APPDATA%\shardx-launcher`. It verifies the files and seals existing login keys
+for this Windows account. Existing local ShardX data is backed up beside the data
+folder before replacement; the two sets of profiles are not merged. An existing
+`ShardX Launcher Local` application folder is never overwritten.
+
+When complete, choose **Quit USB launcher**, then open the local EXE shown in the
+dialog. It runs in normal mode, without the USB. Keep the original USB copy as a
+backup; it is left intact, and future changes in the local copy do not sync to it.
+Only files inside `ShardXData` are copied—downloads stored elsewhere are not moved.
+Stored account data is preserved, but websites may still require a fresh sign-in.
 
 ### Close and move safely
 

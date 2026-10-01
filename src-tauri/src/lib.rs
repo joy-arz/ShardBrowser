@@ -10,6 +10,7 @@ mod gpu_caps;
 mod launch;
 mod mcp_setup;
 mod portable;
+mod local_move;
 mod sequential;
 mod migrate;
 mod process;
@@ -1924,6 +1925,7 @@ async fn portable_safe_close(window: tauri::Window) -> Result<(), String> {
 /// Safe-close dialog's Quit button.
 #[tauri::command]
 async fn app_quit(app: tauri::AppHandle) -> Result<(), String> {
+    if local_move::copying() { return Err("wait for the move to finish before quitting".into()); }
     sequential::stop_and_wait().await.map_err(|e| e.to_string())?;
     app.exit(0);
     Ok(())
@@ -2230,6 +2232,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if local_move::copying() { api.prevent_close(); return; }
                 if sequential::active() {
                     api.prevent_close();
                     use tauri::Manager;
@@ -2244,7 +2247,12 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(move |invoke: tauri::ipc::Invoke| {
+            if local_move::locked() && invoke.message.command() != "app_quit" {
+                invoke.resolver.reject("Move to this PC is in progress or complete; quit and use the local launcher");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             sync_launch,
             sync_status,
             sync_set_paused,
@@ -2343,6 +2351,8 @@ pub fn run() {
             sequential::sequential_start,
             sequential::sequential_stop,
             sequential::sequential_status,
+            local_move::portable_move_plan,
+            local_move::portable_move_to_pc,
             portable_status,
             portable_enable,
             portable_clear_local_cache,
@@ -2380,7 +2390,9 @@ pub fn run() {
             runtime::runtime_status_local,
             runtime::runtime_install,
             runtime::launcher_update_check,
-        ])
+        ];
+            handler(invoke)
+        })
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
 

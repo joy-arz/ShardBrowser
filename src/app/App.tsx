@@ -5,6 +5,7 @@ import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
 import { StarModal } from "../widgets/StarModal/StarModal";
+import { MoveToPcModal } from "../widgets/SafeClose/MoveToPc";
 import { SafeCloseModal } from "../widgets/SafeClose/SafeClose";
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
@@ -32,6 +33,7 @@ export function App() {
     <>
       <TitleBar />
       <SafeCloseModal />
+      <MoveToPcModal />
       <HelperWatcher />
       <WhatsNewGate />
       <FirstRunGate>

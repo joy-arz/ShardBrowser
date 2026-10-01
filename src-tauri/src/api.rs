@@ -98,6 +98,8 @@ type ApiResult = Result<Json<Value>, ApiError>;
 // ---- auth middleware ----
 
 async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
+    let _move_guard = crate::local_move::api_gate().read().await;
+    if crate::local_move::locked() { return Err(StatusCode::SERVICE_UNAVAILABLE); }
     let secret = read_secret();
     let ok = req
         .headers()

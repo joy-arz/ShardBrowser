@@ -116,3 +116,17 @@ After setup, changes are written directly to `ShardXData`; do not repeat Make
 Portable. Save Settings changes, then use **Safe close**, wait, quit and safely
 eject before moving the drive. Websites may expire sessions or require another
 login, so cross-PC sign-in and tab restoration are not guaranteed.
+
+## Move back to this PC (Windows)
+
+Choose **Move to this PC** next to **Safe close**. Review the displayed destinations
+and confirm. The action stops sequential automation, closes browser profiles,
+copies and verifies the launcher, WebView2 and full user data, and re-seals the
+existing login keys for the current Windows account. Other automation projects
+must be stopped first. No new login key is generated as a fallback.
+
+After completion, quit the USB launcher and run the displayed local EXE. The
+local application contains no `ShardXData`, so it uses normal local storage.
+Existing local data is backed up before replacement, not merged. The original
+USB data remains a separate backup. Downloads or other files outside `ShardXData`
+are not moved. Keep enough local free space for the copy and backup.

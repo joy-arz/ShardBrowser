@@ -353,6 +353,20 @@ mod win {
         write_key(&ls_path, &raw_key)
     }
 
+    // Migration must never mint a replacement key: doing so would lose logins.
+    pub fn localize_key(udd: &Path) -> Result<()> {
+        let portable = udd.join(PORTABLE_STATE_FILE);
+        let local = udd.join("Local State");
+        let key = if portable.exists() {
+            Some(read_portable_key(&portable)?.context("Portable State has no valid encryption key")?)
+        } else if local.exists() {
+            read_key(&local).context("cannot recover this profile's login key on this PC")?
+        } else { None };
+        if let Some(key) = key { write_key(&local, &key)?; }
+        if portable.exists() { std::fs::remove_file(portable)?; }
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -366,6 +380,26 @@ mod win {
             p.push(format!("shardx-win-cookie-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&p).unwrap();
             p
+        }
+
+        #[test]
+        fn local_migration_preserves_key_and_removes_plaintext_copy() {
+            let udd = tmp();
+            ensure_portable_key(&udd).unwrap();
+            let before = read_portable_key(&udd.join(PORTABLE_STATE_FILE)).unwrap().unwrap();
+            localize_key(&udd).unwrap();
+            assert_eq!(read_key(&udd.join("Local State")).unwrap().unwrap(), before);
+            assert!(!udd.join(PORTABLE_STATE_FILE).exists());
+            std::fs::remove_dir_all(udd).unwrap();
+        }
+
+        #[test]
+        fn local_migration_rejects_invalid_portable_key() {
+            let udd = tmp();
+            std::fs::write(udd.join(PORTABLE_STATE_FILE), "{}").unwrap();
+            assert!(localize_key(&udd).is_err());
+            assert!(udd.join(PORTABLE_STATE_FILE).exists());
+            std::fs::remove_dir_all(udd).unwrap();
         }
 
         #[test]
@@ -611,3 +645,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&udd);
     }
 }
+
+/// Re-seal an existing profile key for this Windows account, without changing it.
+#[cfg(windows)]
+pub fn localize_oscrypt_key(udd: &Path) -> Result<()> { win::localize_key(udd) }
+#[cfg(not(windows))]
+pub fn localize_oscrypt_key(_udd: &Path) -> Result<()> { Ok(()) }

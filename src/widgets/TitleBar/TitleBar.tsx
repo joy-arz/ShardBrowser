@@ -4,6 +4,8 @@ import { HOST_OS } from "../../shared/lib/utils";
 import { portableStatus } from "../../entities/portable";
 import { useSafeClose } from "../SafeClose/SafeClose";
 
+import { useMoveToPc } from "../SafeClose/MoveToPc";
+
 import { useT } from "../../shared/i18n";
 
 export function TitleBar() {
@@ -51,6 +53,12 @@ export function TitleBar() {
             </svg>
             Safe close
           </button>
+          {HOST_OS === "Windows" && <button
+            type="button"
+            onClick={() => useMoveToPc.getState().show()}
+            title="Copy this portable installation and all profiles to this PC"
+            className="pointer-events-auto ml-1 rounded-[4px] px-1.5 py-px text-[10px] font-medium text-text-sub-600 hover:bg-bg-weak-50 hover:text-text-strong-950"
+          >Move to this PC</button>}
         </span>
       )}
       {/* Custom min/max/close on Win/Linux (macOS uses native traffic lights). */}
