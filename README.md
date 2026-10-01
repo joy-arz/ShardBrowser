@@ -498,7 +498,7 @@ and you're ready to bind a proxy and launch your first profile.
 
 ---
 
-## Portable Mode (USB drive)
+## Portable Mode (USB drive) - fork feature
 
 *Windows-focused, opt-in, off by default.* Profiles, cookies, saved login data,
 proxies, fingerprint assignments and settings travel in `ShardXData` on your USB.
