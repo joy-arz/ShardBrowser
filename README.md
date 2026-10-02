@@ -572,6 +572,34 @@ Keep a backup of `ShardXData` made while all profiles are closed.
 
 Full details: [PORTABLE_MODE.md](PORTABLE_MODE.md).
 
+## Bulk numbered profiles
+
+On the **Browsers** page, click **Add bulk profiles**. Set **Start number** and
+**End number**, or change **Count** (maximum 1,000 per batch). For example, 1–50
+creates `001`–`050`; the next batch defaults to 51–100. You can change either
+endpoint. Existing numeric names, including unpadded equivalents such as `1`,
+block the entire batch rather than being overwritten.
+
+Profiles use installed fingerprint templates for the current operating system,
+with the normal hardware randomization plus distinct, enabled canvas and audio
+noise seeds saved permanently with each profile. Device/GPU templates can repeat;
+the resulting identities have separate seeds. Install the fingerprint library
+first if the launcher reports that no matching templates are available.
+
+Use the same start/end numbers in **Sequential website automation**. Each profile
+has its own profile ID and browser storage; bulk creation does not copy accounts
+or cookies between profiles.
+
+### Engine download connection errors
+
+The macOS ARM64 engine uses the upstream `ShardX-Mac-arm64.zip` archive. Some
+networks replace its DNS answer with a blocking page, causing HTTPS certificate
+errors. If the normal archive connection fails, the launcher retries using Google
+DNS-over-HTTPS to resolve only the archive hostname. Certificate checks stay on;
+this does not change browser/profile DNS settings or send browsing URLs to Google.
+If both attempts fail, check your connection, proxy or VPN and retry. A failed
+network download leaves the existing engine installation in place.
+
 ## Sequential profile website automation
 
 Open **Automation → Sequential website automation**:

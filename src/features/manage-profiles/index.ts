@@ -16,3 +16,5 @@ export { FromTemplateButton } from "./ui/FromTemplateButton";
 export { ExtensionPicker } from "./ui/ExtensionPicker";
 export { ProxySelect } from "./ui/ProxySelect";
 export { ProfileFilterBar } from "./ui/ProfileFilterBar";
+
+export { BulkProfileButton } from "./ui/BulkProfileButton";

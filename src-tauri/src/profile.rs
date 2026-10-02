@@ -628,3 +628,115 @@ mod tests {
         assert!(!m(r#"{"navigator":{"platform":"Linux armv8l"}}"#));
     }
 }
+
+/// Validate before reading templates or writing any profile files.
+pub fn bulk_numbers(start: u32, end: u32) -> Result<Vec<String>> {
+    anyhow::ensure!(start > 0 && end >= start && end <= 999999 && end - start < 1000,
+        "Choose a range from 1 to 999999 containing at most 1000 profiles");
+    Ok((start..=end).map(|n| format!("{n:03}")).collect())
+}
+
+fn prepare_bulk(profiles: &mut [StoredProfile], existing: &[StoredProfile]) -> Result<()> {
+    use std::collections::HashSet;
+    let numeric = |p: &StoredProfile| p.config.get("name").and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+        .and_then(|n| n.parse::<u32>().ok());
+    let mut names: HashSet<u32> = existing.iter().filter_map(numeric).collect();
+    let mut seeds = HashSet::new();
+    for p in existing {
+        if let Some(noise) = p.config.get("noise").and_then(|n| n.as_object()) {
+            for slot in noise.values() {
+                if let Some(seed) = slot.get("seed").and_then(|s| s.as_u64()) { seeds.insert(seed as u32); }
+            }
+        }
+    }
+    for p in profiles {
+        let number = numeric(p).context("Bulk profile must have a numeric name")?;
+        anyhow::ensure!(names.insert(number), "Profile number {number:03} already exists; choose another range");
+        p.meta.id = uuid::Uuid::new_v4().to_string();
+        p.meta.created_at = Some(chrono_now_iso());
+        p.meta.rev = 1;
+        let noise = p.config.entry("noise").or_insert_with(|| serde_json::json!({}));
+        let noise = noise.as_object_mut().context("Invalid fingerprint noise configuration")?;
+        for slot in ["canvas", "audio"] {
+            let mut seed = derive_noise_seed(&p.meta.id, slot);
+            while seed == 0 || !seeds.insert(seed) { seed = seed.wrapping_add(1); }
+            noise.insert(slot.into(), serde_json::json!({"enabled":true,"seed":seed}));
+        }
+        fill_noise_seeds(&mut p.config, &p.meta.id);
+    }
+    Ok(())
+}
+
+fn save_bulk_in(dir: &Path, profiles: &mut [StoredProfile]) -> Result<()> {
+    let mut existing = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            // Do not silently ignore damaged files and accidentally reuse a name.
+            existing.push(serde_json::from_slice::<StoredProfile>(&fs::read(&path)?)
+                .with_context(|| format!("Read existing profile {}", path.display()))?);
+        }
+    }
+    prepare_bulk(profiles, &existing)?;
+    let mut written: Vec<PathBuf> = Vec::new();
+    for p in profiles {
+        let path = dir.join(format!("{}.json", p.meta.id));
+        let result = (|| -> Result<()> {
+            anyhow::ensure!(!path.exists(), "Profile ID already exists");
+            write_atomic(&path, &serde_json::to_vec_pretty(p)?)
+        })();
+        if let Err(error) = result {
+            let mut rollback_errors = Vec::new();
+            for path in written {
+                if let Err(e) = fs::remove_file(&path) { rollback_errors.push(format!("{}: {e}", path.display())); }
+            }
+            anyhow::bail!("Bulk creation failed: {error:#}. Rollback errors: {}", rollback_errors.join(", "));
+        }
+        written.push(path);
+    }
+    Ok(())
+}
+
+pub fn save_bulk(profiles: &mut [StoredProfile]) -> Result<()> {
+    let _guard = file_lock();
+    save_bulk_in(&store::profiles_dir()?, profiles)
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+    fn batch(start: u32, end: u32) -> Vec<StoredProfile> {
+        bulk_numbers(start, end).unwrap().into_iter().map(|name| {
+            let mut p = StoredProfile::default();
+            p.config.insert("name".into(), name.into()); p
+        }).collect()
+    }
+    #[test]
+    fn validates_ranges() {
+        assert_eq!(bulk_numbers(49,51).unwrap(), ["049","050","051"]);
+        for (a,b) in [(0,1),(2,1),(1,1001),(999999,1000000)] { assert!(bulk_numbers(a,b).is_err()); }
+    }
+    #[test]
+    fn saves_two_batches_with_distinct_persistent_identities_and_rejects_collisions() {
+        let dir = std::env::temp_dir().join(format!("shardx-bulk-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let mut first = batch(1,50); save_bulk_in(&dir, &mut first).unwrap();
+        let mut second = batch(51,100); save_bulk_in(&dir, &mut second).unwrap();
+        let mut seeds = std::collections::HashSet::new();
+        for p in first.iter().chain(&second) {
+            let saved: StoredProfile = serde_json::from_slice(&fs::read(dir.join(format!("{}.json",p.meta.id))).unwrap()).unwrap();
+            for slot in ["canvas","audio"] {
+                assert_eq!(saved.config["noise"][slot]["enabled"], true);
+                assert!(seeds.insert(saved.config["noise"][slot]["seed"].as_u64().unwrap()));
+                assert_eq!(saved.config["noise"][slot], p.config["noise"][slot]);
+            }
+        }
+        let mut conflict = batch(100,101);
+        assert!(save_bulk_in(&dir, &mut conflict).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(),100);
+        let mut unpadded = batch(1,1); unpadded[0].config.insert("name".into(), "1".into());
+        assert!(prepare_bulk(&mut unpadded, &first).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

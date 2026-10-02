@@ -494,6 +494,19 @@ mod tests {
         }
     }
     #[test]
+    fn bulk_numbered_batches_resolve_for_automation() {
+        let names = crate::profile::bulk_numbers(1, 50).unwrap().into_iter()
+            .chain(crate::profile::bulk_numbers(51, 100).unwrap());
+        let profiles: Vec<_> = names.map(|name| (format!("id-{name}"), name)).collect();
+        let mut cfg = config();
+        cfg.start = 51; cfg.end = 100;
+        let plan = resolve(&cfg, &profiles).unwrap();
+        assert_eq!(plan.len(), 50);
+        assert_eq!(plan[0].id.as_deref(), Some("id-051"));
+        assert_eq!(plan[49].id.as_deref(), Some("id-100"));
+        assert!(plan.iter().all(|p| p.error.is_none()));
+    }
+    #[test]
     fn missing_and_ambiguous_names_are_explicit() {
         let p = resolve(
             &config(),

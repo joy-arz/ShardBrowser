@@ -733,15 +733,9 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     let need_browser =
         force || !installed_now || engine_outdated(&local, &manifest, &spec.browser.key);
     let browser_etag = if need_browser {
-        // Wipe the old engine tree first. The archive extracts *over* the
-        // existing dir but never deletes files the new version dropped — most
-        // critically the previous `<version>.manifest`, which lingers beside the
-        // new one and poisons version detection into an endless re-download (and
-        // stale DLLs/.so could be loaded). Applies to win + linux + mac alike.
-        let _ = fs::remove_dir_all(base.join(engine_root_dir()));
         download_and_extract(&window, &spec.browser, &base)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?
     } else {
         local.browser_etag.clone().unwrap_or_default()
     };
@@ -862,10 +856,87 @@ async fn install_fingerprints(
     Ok(Some(etag))
 }
 
+const ARCHIVE_HOST: &str = "pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
+
+fn archive_dns_addresses(value: &serde_json::Value) -> Result<Vec<std::net::SocketAddr>> {
+    anyhow::ensure!(value["Status"].as_u64() == Some(0), "Secure DNS lookup failed");
+    let answers = value["Answer"].as_array().context("Secure DNS returned no addresses")?;
+    let mut addresses = Vec::new();
+    for answer in answers.iter().take(32) {
+        if answer["type"].as_u64() != Some(1)
+            || answer["name"].as_str().unwrap_or("").trim_end_matches('.') != ARCHIVE_HOST {
+            continue;
+        }
+        if let Some(ip) = answer["data"].as_str().and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()) {
+            let first = ip.octets()[0];
+            if !ip.is_private() && !ip.is_loopback() && !ip.is_link_local()
+                && !ip.is_documentation() && first != 0 && first < 224
+                && !(ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])) {
+                addresses.push(std::net::SocketAddr::new(ip.into(), 443));
+            }
+        }
+    }
+    anyhow::ensure!(!addresses.is_empty(), "Secure DNS returned no public archive addresses");
+    Ok(addresses)
+}
+
+async fn archive_response(url: &str, probe: bool) -> Result<reqwest::Response> {
+    use std::time::Duration;
+    let parsed = reqwest::Url::parse(url)?;
+    anyhow::ensure!(parsed.scheme() == "https" && parsed.host_str() == Some(ARCHIVE_HOST),
+        "Unexpected archive host");
+    let builder = || reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(60));
+    let request = |client: reqwest::Client| {
+        let request = client.get(url);
+        if probe { request.header(reqwest::header::RANGE, "bytes=0-3") } else { request }
+    };
+    let original = match request(builder().build()?).send().await {
+        Ok(response) => return Ok(response.error_for_status()?),
+        Err(error) => error,
+    };
+    // Some networks substitute a blocking server via DNS. Resolve only our
+    // archive host over HTTPS, retaining hostname/SNI and certificate checks.
+    let fallback = async {
+        let dns: serde_json::Value = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15)).build()?
+            .get("https://dns.google/resolve")
+            .query(&[("name", ARCHIVE_HOST), ("type", "A")])
+            .send().await?.error_for_status()?.json().await?;
+        let addresses = archive_dns_addresses(&dns)?;
+        let client = builder().resolve_to_addrs(ARCHIVE_HOST, &addresses).build()?;
+        Ok::<_, anyhow::Error>(request(client).send().await?.error_for_status()?)
+    }.await;
+    fallback.with_context(|| format!(
+        "Archive download failed using system DNS ({original:#}) and secure DNS. Check your connection, proxy or VPN; HTTPS certificate validation remains enabled"))
+}
+
+#[cfg(test)]
+mod archive_download_tests {
+    use super::*;
+    #[test]
+    fn secure_dns_rejects_wrong_host_private_addresses_and_errors() {
+        let response = serde_json::json!({"Status":0,"Answer":[
+            {"name":ARCHIVE_HOST,"type":1,"data":"127.0.0.1"},
+            {"name":"other.example","type":1,"data":"104.18.50.34"},
+            {"name":ARCHIVE_HOST,"type":1,"data":"104.18.50.34"}]});
+        assert_eq!(archive_dns_addresses(&response).unwrap().len(), 1);
+        assert!(archive_dns_addresses(&serde_json::json!({"Status":3})).is_err());
+    }
+    #[tokio::test]
+    #[ignore = "requires internet; fetches only the archive ZIP signature"]
+    async fn live_archive_download() {
+        let url = format!("{PUB_BASE}/ShardX-Mac-arm64.zip");
+        let mut response = archive_response(&url, true).await.unwrap();
+        let chunk = response.chunk().await.unwrap().unwrap();
+        assert!(chunk.starts_with(b"PK"));
+    }
+}
+
 /// Stream archive → temp file → extract; emits `runtime:progress` events.
 async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<String> {
     let url = format!("{PUB_BASE}/{}", spec.key);
-    let mut resp = reqwest::Client::new().get(&url).send().await?.error_for_status()?;
+    let mut resp = archive_response(&url, false).await?;
     let total = resp.content_length().unwrap_or(0);
     let etag = resp
         .headers()
@@ -911,6 +982,13 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
             "percent": 100,
         }),
     );
+
+    // Keep a working installation when the network download fails. Remove stale
+    // engine files only once its replacement archive has arrived completely.
+    if host_spec().is_some_and(|host| host.browser.key == spec.key) {
+        let old = base.join(engine_root_dir());
+        if old.exists() { fs::remove_dir_all(old)?; }
+    }
 
     let zip_path = tmp.clone();
     let dest = base.to_path_buf();

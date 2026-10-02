@@ -1141,6 +1141,31 @@ fn profile_create_from_template(
     create_from_fingerprint_core(Some(&window), &template_id)
 }
 
+#[tauri::command]
+async fn profile_create_bulk(window: tauri::WebviewWindow, start: u32, end: u32) -> Result<usize, String> {
+    let _gate = sequential::launch_gate().lock().await;
+    if local_move::locked() || sequential::active() {
+        return Err("Finish migration or sequential automation before adding profiles".into());
+    }
+    let names = profile::bulk_numbers(start, end).map_err(|e| e.to_string())?;
+    let mut templates = fingerprints::list_all().map_err(|e| e.to_string())?;
+    templates.retain(|t| t.platform == host_platform());
+    templates.sort_by(|a,b| a.id.cmp(&b.id));
+    if templates.is_empty() { return Err("Install fingerprint templates for this operating system first".into()); }
+    let mut profiles = Vec::with_capacity(names.len());
+    for (index, name) in names.into_iter().enumerate() {
+        let template = &templates[(start as usize - 1 + index) % templates.len()];
+        let mut config = build_fingerprint_config(Some(&window), &template.id)?;
+        config.insert("name".into(), name.into());
+        profiles.push(serde_json::from_value::<profile::StoredProfile>(Value::Object(config))
+            .map_err(|e| e.to_string())?);
+    }
+    let count = profiles.len();
+    tauri::async_runtime::spawn_blocking(move || profile::save_bulk(&mut profiles))
+        .await.map_err(|e| e.to_string())?.map_err(|e| format!("{e:#}"))?;
+    Ok(count)
+}
+
 /// Merge library fingerprint into fresh profile map; tz/lang/geo set to "auto" sentinel.
 pub fn merge_library_fingerprint(
     template_id: &str,
@@ -2322,6 +2347,7 @@ pub fn run() {
             folder_delete,
             host_platform,
             profile_create_from_template,
+            profile_create_bulk,
             enrich_picks_for_preset,
             fingerprint_list,
             gpu_caps,
