@@ -160,6 +160,35 @@ pub fn launch_gate() -> &'static tokio::sync::Mutex<()> {
     G.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+// Check at admission and again for every profile, because Settings can change
+// while a batch is running. Never let an override turn a background run visible
+// in the foreground or switch it to a different profile/CDP connection.
+pub fn validate_launch_args(extra_args: &str) -> Result<()> {
+    for a in crate::settings::parse_extra_args(extra_args) {
+        if matches!(
+            a.split('=').next(),
+            Some(
+                "--user-data-dir"
+                    | "--profile-directory"
+                    | "--incognito"
+                    | "--guest"
+                    | "--remote-debugging-port"
+                    | "--remote-debugging-pipe"
+                    | "--headless"
+                    | "--app"
+                    | "--app-id"
+                    | "--restore-last-session"
+                    | "--auto-open-devtools-for-tabs"
+                    | "--start-fullscreen"
+                    | "--kiosk"
+            )
+        ) {
+            bail!("remove conflicting extra launch argument: {a}");
+        }
+    }
+    Ok(())
+}
+
 trait Lifecycle: Send + Sync {
     fn start<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>>;
     fn navigate<'a>(&'a self, id: &'a str, url: &'a str) -> BoxFuture<'a, Result<()>>;
@@ -172,14 +201,14 @@ impl Lifecycle for Native {
         Box::pin(async move {
             #[cfg(feature = "automation")]
             {
-                let out = crate::launch::launch_profile(id, true, false).await?;
+                let out = crate::launch::launch_profile_background(id).await?;
                 let info = out.cdp.context(
                     out.cdp_error
                         .unwrap_or_else(|| "browser did not report CDP readiness".into()),
                 )?;
                 tokio::time::timeout(
                     CONNECT_TIMEOUT,
-                    crate::cdp::attach(id.into(), info.web_socket_debugger_url, |_| {}),
+                    crate::cdp::attach_background(id.into(), info.web_socket_debugger_url),
                 )
                 .await
                 .context("CDP connection timeout")??;
@@ -403,22 +432,7 @@ async fn start(config: Config) -> Result<()> {
     if crate::runner::all().iter().any(|r| r.running) {
         bail!("stop other automation projects first");
     }
-    // User switches must not defeat persistent profiles or the CDP transport.
-    for a in crate::settings::parse_extra_args(&crate::settings::load()?.extra_args) {
-        if matches!(
-            a.split('=').next(),
-            Some(
-                "--user-data-dir"
-                    | "--profile-directory"
-                    | "--incognito"
-                    | "--guest"
-                    | "--remote-debugging-port"
-                    | "--remote-debugging-pipe"
-            )
-        ) {
-            bail!("remove conflicting extra launch argument: {a}");
-        }
-    }
+    validate_launch_args(&crate::settings::load()?.extra_args)?;
     let profiles = crate::profile::list_all()?
         .into_iter()
         .map(|p| (p.id, p.name))
@@ -481,6 +495,16 @@ mod tests {
             .rev()
             .map(|i| (format!("uuid-{i}"), format!("{i:03}")))
             .collect()
+    }
+    #[test]
+    fn rejects_window_and_profile_overrides_but_preserves_regular_switches() {
+        for args in ["--headless=new", "--app=https://example.com", "--kiosk",
+            "--restore-last-session", "--auto-open-devtools-for-tabs", "--start-fullscreen",
+            "--user-data-dir='another profile'", "--remote-debugging-port=9222"] {
+            assert!(validate_launch_args(args).is_err(), "accepted {args}");
+        }
+        assert!(validate_launch_args("--disable-gpu --lang=en-US").is_ok());
+        assert!(validate_launch_args("").is_ok());
     }
     #[test]
     fn numeric_range_resolves_ids_not_names() {
@@ -763,7 +787,7 @@ mod browser_smoke {
             let mut settings = crate::settings::load()?;
             settings.browser_path = Some(browser);
             settings.portable_local_cache = false; // Keep every test artifact in its disposable root.
-            settings.extra_args = "--headless=new --disable-gpu".into();
+            settings.extra_args = "--disable-gpu".into();
             crate::settings::save(&settings)?;
             let mut ids = vec![];
             for n in 1..=2 {
@@ -805,6 +829,15 @@ mod browser_smoke {
                     while active() && !status().phase.starts_with("waiting") { tokio::time::sleep(POLL).await; }
                 }).await?;
                 anyhow::ensure!(active(), "batch exited before cancellation: {:?}", status());
+                let focus = crate::cdp::page_call(&ids[0], "Runtime.evaluate", serde_json::json!({
+                    "expression":"({focused:document.hasFocus(),headless:navigator.userAgent.includes('HeadlessChrome')})",
+                    "returnByValue":true
+                })).await?;
+                anyhow::ensure!(focus["result"]["value"]["focused"] == false,
+                    "background profile took focus: {focus}");
+                anyhow::ensure!(focus["result"]["value"]["headless"] == false,
+                    "background mode must keep the regular browser: {focus}");
+
                 anyhow::ensure!(crate::portable::local_cache_dir(&ids[0]).is_some_and(|p| p.is_dir() && !p.starts_with(&root)), "local cache was not separated");
                 stop_and_wait().await?;
                 anyhow::ensure!(status().phase=="stopped" && status().results.len()==1,"Stop advanced to another profile: {:?}",status());

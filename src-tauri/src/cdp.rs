@@ -114,6 +114,28 @@ where
     // uses it to surface Traffic.requestPaused for the request interceptor.
     E: Fn(String, Value) + Send + Sync + 'static,
 {
+    attach_with_window_mode(profile_id, ws_url, on_frame, on_nav, on_event, false).await
+}
+
+/// Create a fresh, inactive window for a sequential batch. Do not activate an
+/// existing target or fall back to foreground creation if the engine rejects it.
+pub async fn attach_background(profile_id: String, ws_url: String) -> Result<()> {
+    attach_with_window_mode(profile_id, ws_url, |_| {}, |_, _| {}, |_, _| {}, true).await
+}
+
+async fn attach_with_window_mode<F, N, E>(
+    profile_id: String,
+    ws_url: String,
+    on_frame: F,
+    on_nav: N,
+    on_event: E,
+    background: bool,
+) -> Result<()>
+where
+    F: Fn(Frame) + Send + Sync + 'static,
+    N: Fn(String, String) + Send + Sync + 'static,
+    E: Fn(String, Value) + Send + Sync + 'static,
+{
     if is_attached(&profile_id) {
         return Ok(());
     }
@@ -253,19 +275,33 @@ where
         });
     }
 
-    // Attach to the first page target. flatten:true makes the page reachable
-    // over this same socket with a sessionId, so one connection serves both.
-    let targets = session.call("Target.getTargets", json!({}), None).await?;
-    let page_target = targets
-        .get("targetInfos")
-        .and_then(|t| t.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .find(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
-        })
-        .and_then(|t| t.get("targetId").and_then(|x| x.as_str()))
-        .ok_or_else(|| anyhow!("the profile has no page open"))?
-        .to_string();
+    // Background runs create their own inactive window. Other callers still
+    // attach to the first existing page. flatten:true shares this socket.
+    let page_target = if background {
+        session
+            .call(
+                "Target.createTarget",
+                json!({"url": "about:blank", "newWindow": true, "background": true}),
+                None,
+            )
+            .await?
+            .get("targetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("no targetId from background window creation"))?
+            .to_string()
+    } else {
+        let targets = session.call("Target.getTargets", json!({}), None).await?;
+        targets
+            .get("targetInfos")
+            .and_then(|t| t.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
+            })
+            .and_then(|t| t.get("targetId").and_then(|x| x.as_str()))
+            .ok_or_else(|| anyhow!("the profile has no page open"))?
+            .to_string()
+    };
 
     let attached = session
         .call(

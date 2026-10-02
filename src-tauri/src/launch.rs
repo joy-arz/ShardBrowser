@@ -59,6 +59,26 @@ pub async fn launch_profile_synced(
     bus_port: u16,
     bus_token: &str,
 ) -> Result<LaunchOutcome> {
+    launch_profile_with_window_mode(
+        profile_id, enable_cdp, headless, sync_group, bus_port, bus_token, false,
+    ).await
+}
+
+/// Sequential batches create their window through CDP after startup, without
+/// activating it. Keep this separate from manual/API launch behavior.
+pub async fn launch_profile_background(profile_id: &str) -> Result<LaunchOutcome> {
+    launch_profile_with_window_mode(profile_id, true, false, None, 0, "", true).await
+}
+
+async fn launch_profile_with_window_mode(
+    profile_id: &str,
+    enable_cdp: bool,
+    headless: bool,
+    sync_group: Option<&str>,
+    bus_port: u16,
+    bus_token: &str,
+    background: bool,
+) -> Result<LaunchOutcome> {
     let _gate = crate::sequential::launch_gate().lock().await;
     if crate::local_move::locked() { anyhow::bail!("migration to this PC is in progress; quit and open the local launcher when complete"); }
     if !crate::sequential::launch_allowed() { anyhow::bail!("sequential automation owns the launcher; stop the batch first"); }
@@ -318,6 +338,9 @@ pub async fn launch_profile_synced(
 
     // Screen resolution mode: presence-only switch to use host monitor.
     let s = settings::load()?;
+    if background {
+        crate::sequential::validate_launch_args(&s.extra_args)?;
+    }
     if s.screen_resolution_mode.as_deref() == Some("real") {
         cmd.arg("--shardx-real-screen");
     }
@@ -355,6 +378,9 @@ pub async fn launch_profile_synced(
 
     if headless {
         cmd.arg("--headless=new");
+    }
+    if background {
+        cmd.arg("--no-startup-window");
     }
 
     // Pin X11 (XWayland under Wayland): a Wayland client may not place its own windows,

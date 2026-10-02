@@ -608,7 +608,8 @@ Open **Automation → Sequential website automation**:
 2. Enter the website URL and wait time (default **15 seconds**).
 3. Choose **Start automation**.
 
-Each existing profile starts, connects through CDP, opens the URL, waits for page
+Each existing profile opens a background window without requesting focus,
+connects through CDP, opens the URL, waits for page
 readiness, waits the chosen duration, and stops before the next profile starts.
 Names resolve to their internal profile IDs; no separate profile store is created.
 
