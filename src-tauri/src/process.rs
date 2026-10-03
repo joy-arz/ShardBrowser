@@ -28,6 +28,15 @@ pub struct CdpInfo {
     pub web_socket_debugger_url: String,
 }
 
+#[cfg(any(windows, test))]
+async fn run_shutdown_helper(command: &mut tokio::process::Command, limit: std::time::Duration) {
+    command.kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = tokio::time::timeout(limit, command.status()).await;
+}
+
 impl Tracker {
     pub fn new() -> Self {
         Self {
@@ -73,16 +82,15 @@ impl Tracker {
                     }
                     #[cfg(windows)]
                     {
-                        use std::os::windows::process::CommandExt;
                         if let Some(p) = child.id() {
                             // taskkill /PID without /F posts WM_CLOSE for clean shutdown.
                             // 0x08000000 = CREATE_NO_WINDOW — suppress the console flash.
-                            let _ = std::process::Command::new("taskkill")
-                                .args(["/PID", &p.to_string()])
-                                .creation_flags(0x08000000)
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status();
+                            let mut helper = tokio::process::Command::new("taskkill");
+                            helper.args(["/PID", &p.to_string()])
+                                .creation_flags(0x08000000);
+                            // taskkill itself can hang after the window disappears.
+                            // It must not block the runtime or prevent hard-kill fallback.
+                            run_shutdown_helper(&mut helper, std::time::Duration::from_secs(5)).await;
                         }
                     }
                     let graceful = tokio::time::timeout(
@@ -95,24 +103,36 @@ impl Tracker {
                     }
                 }
             }
-            // Bump the persisted total runtime; non-temporary only (temp
-            // profiles get deleted next line so their counter is moot).
-            if !temporary {
-                let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                if let Err(e) = crate::profile::add_runtime(&profile_id, elapsed_ms) {
-                    eprintln!("[launcher] add_runtime({profile_id}) failed: {e}");
+            // USB writes/deletion may be slow. Keep the entry reserved until
+            // they finish, but do not block an async worker (including its timers).
+            let finalizing_id = profile_id.clone();
+            let finalized = tokio::task::spawn_blocking(move || {
+                let profile_id = finalizing_id;
+                // Bump the persisted total runtime; non-temporary only (temp
+                // profiles get deleted next line so their counter is moot).
+                if !temporary {
+                    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    if let Err(e) = crate::profile::add_runtime(&profile_id, elapsed_ms) {
+                        eprintln!("[launcher] add_runtime({profile_id}) failed: {e}");
+                    }
+                }
+                // Tear down temporary profile (config + udd) on close.
+                if temporary {
+                    match crate::profile::delete(&profile_id) {
+                        Ok(()) => eprintln!("[launcher] temporary profile {profile_id} deleted on close"),
+                        Err(e) => eprintln!("[launcher] temporary profile {profile_id} cleanup failed: {e}"),
+                    }
+                }
+            }).await;
+            if let Err(e) = finalized {
+                eprintln!("[tracker] {profile_id} finalization failed: {e}");
+            }
+            if let Ok(mut g) = self.inner.lock() {
+                if g.get(&profile_id).is_some_and(|entry| entry.pid == pid) {
+                    g.remove(&profile_id);
                 }
             }
-            // Tear down temporary profile (config + udd) on close.
-            if temporary {
-                match crate::profile::delete(&profile_id) {
-                    Ok(()) => eprintln!("[launcher] temporary profile {profile_id} deleted on close"),
-                    Err(e) => eprintln!("[launcher] temporary profile {profile_id} cleanup failed: {e}"),
-                }
-            }
-            if let Ok(mut g) = Self::shared().inner.lock() {
-                g.remove(&profile_id);
-            }
+
         });
 
         pid
@@ -158,7 +178,10 @@ impl Tracker {
             g.get(profile_id).map(|e| e.killer.clone())
         };
         if let Some(k) = killer {
-            let _ = k.send(()).await;
+            // One request is enough. A full queue means shutdown was already
+            // requested; a closed receiver means the monitor is finalizing.
+            // Awaiting send here can strand repeated Stop requests forever.
+            let _ = k.try_send(());
             Ok(true)
         } else {
             Ok(false)
@@ -180,4 +203,40 @@ pub struct RunningProfile {
     /// Milliseconds since the engine was spawned; frontend formats as
     /// "1h 23m" / "12m 30s" / "45s".
     pub uptime_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn repeated_shutdown_requests_do_not_wait_on_a_full_queue() {
+        let tracker = Tracker::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tracker.inner.lock().unwrap().insert("test".into(), ChildEntry {
+            pid: 1, killer: tx, cdp: None, started_at: Instant::now(),
+        });
+        for _ in 0..3 {
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(100), tracker.kill("test"))
+                .await.unwrap().unwrap());
+        }
+        drop(rx); // monitor has moved on to profile finalization
+        assert!(tracker.kill("test").await.unwrap());
+        assert!(!tracker.kill("missing").await.unwrap());
+    }
+    #[test]
+    #[ignore = "subprocess fixture for shutdown deadline test"]
+    fn slow_shutdown_helper() {
+        if std::env::var_os("SHARDX_SHUTDOWN_HELPER_TEST").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+    #[tokio::test]
+    async fn stuck_shutdown_helper_is_bounded() {
+        let mut helper = tokio::process::Command::new(std::env::current_exe().unwrap());
+        helper.args(["--ignored", "--exact", "process::tests::slow_shutdown_helper"])
+            .env("SHARDX_SHUTDOWN_HELPER_TEST", "1");
+        tokio::time::timeout(std::time::Duration::from_secs(2),
+            run_shutdown_helper(&mut helper, std::time::Duration::from_millis(100)))
+            .await.expect("shutdown helper blocked the async runtime");
+    }
 }

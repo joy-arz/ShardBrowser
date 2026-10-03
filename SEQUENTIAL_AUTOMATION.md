@@ -29,11 +29,18 @@ limited to 1,000 entries. Wait is 1–86,400 whole seconds.
 
 For each profile: launch → CDP connection → navigate → wait for document readiness
 → wait the configured duration → request shutdown → confirm process exit and
-tracker finalization. The next profile starts only after that confirmation.
+tracker finalization. Shutdown first requests `Browser.close` so background Chromium
+exits as well as closing its window. A bounded OS shutdown fallback remains.
+The next profile starts only after that confirmation.
 A failed startup/navigation is cleaned up before advancing. If shutdown cannot
 be confirmed, the batch halts and reports the profile rather than overlapping it
 with another browser. Launches remain reserved until cleanup succeeds; use Stop
-again to retry a failed shutdown. Stop requests cancellation immediately and waits
+again to retry a failed shutdown. After the initial 20-second shutdown deadline,
+a timed-out cleanup gets one automatic retry of up to 60 seconds with a visible
+waiting status. A closed window alone does not establish that the background
+process and profile writes have finished. If confirmation still fails, **Retry
+cleanup** releases the reservation once cleanup is confirmed; restart the desired
+remaining range afterwards. Stop requests cancellation immediately and waits
 for cleanup.
 The result list records completed, failed, and cancelled entries.
 
@@ -68,7 +75,7 @@ so remounting recovers state. State/results are retained in memory for the curre
 launcher session. No external dependency was added for this feature.
 
 Timeouts: startup/readiness 90 s, CDP attachment 30 s (within startup), navigation
-60 s, shutdown 20 s. The timer starts only after the expected document reports
+60 s, shutdown 20 s plus a 60 s automatic recovery window. The timer starts only after the expected document reports
 `document.readyState === "complete"`; navigation errors and downloads fail the entry.
 
 ## Build and test

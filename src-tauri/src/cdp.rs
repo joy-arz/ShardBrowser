@@ -331,6 +331,14 @@ where
     Ok(())
 }
 
+/// Close the entire browser, including a no-startup-window background process.
+/// A disappearing socket may race the reply; the process tracker confirms exit.
+pub async fn close_browser(profile_id: &str) -> Result<()> {
+    let session = get(profile_id).ok_or_else(|| anyhow!("not attached"))?;
+    session.call("Browser.close", json!({}), None).await?;
+    Ok(())
+}
+
 pub fn detach(profile_id: &str) {
     if let Ok(mut g) = sessions().lock() {
         g.remove(profile_id);

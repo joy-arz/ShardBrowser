@@ -57,7 +57,7 @@ export function SequentialCard() {
       <p className="my-2 text-paragraph-xs text-text-soft-400">The wait starts after navigation finishes. Missing or failed profiles are recorded and skipped after cleanup. Stop closes the current profile before ending the batch.</p>
       <div className="flex gap-2">
         <Button onClick={() => void submit()} disabled={disabled}>Start automation</Button>
-        <Button variant="neutral" mode="stroke" onClick={() => void stop()} disabled={(!state?.running && !state?.current_id) || busy}>{busy && state?.running ? "Stopping…" : "Stop"}</Button>
+        <Button variant="neutral" mode="stroke" onClick={() => void stop()} disabled={(!state?.running && !state?.current_id) || busy}>{busy ? "Stopping…" : !state?.running && state?.current_id ? "Retry cleanup" : "Stop"}</Button>
       </div>
       {(error || state?.error) && <p role="alert" className="mt-3 text-paragraph-sm text-error-base">{error || state?.error}</p>}
       {state && state.total > 0 && <div className="mt-4" aria-live="polite">

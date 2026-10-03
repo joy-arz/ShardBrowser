@@ -615,8 +615,9 @@ Names resolve to their internal profile IDs; no separate profile store is create
 
 Progress and per-profile results appear in the card. **Stop** cancels the batch
 and closes its active profile. Missing or failed profiles are recorded and skipped
-after cleanup. If shutdown cannot be confirmed, the batch halts; use Stop again
-to retry cleanup. Pause/Resume are not implemented.
+after cleanup. Slow shutdown/profile saving gets an automatic cleanup retry with a
+visible waiting status. If it still cannot be confirmed, the batch halts; use
+**Retry cleanup** before restarting the remaining range. Pause/Resume are not implemented.
 
 Portable storage and the local-cache preference apply to these profiles too.
 See [SEQUENTIAL_AUTOMATION.md](SEQUENTIAL_AUTOMATION.md) for timeouts and test details.

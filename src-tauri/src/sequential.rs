@@ -10,6 +10,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(90);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const NAV_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+const CLEANUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(100);
 const MAX_BATCH: u32 = 1000;
 fn default_wait() -> u64 {
@@ -269,6 +270,16 @@ impl Lifecycle for Native {
     }
     fn stop<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            #[cfg(feature = "automation")]
+            if self.running(id) && crate::cdp::is_attached(id) {
+                // Closing the window alone can leave a background Chromium alive.
+                // Give Browser.close time to flush before using the OS backstop.
+                let _ = tokio::time::timeout(Duration::from_secs(2), crate::cdp::close_browser(id)).await;
+                let until = tokio::time::Instant::now() + Duration::from_secs(3);
+                while self.running(id) && tokio::time::Instant::now() < until {
+                    tokio::time::sleep(POLL).await;
+                }
+            }
             crate::process::Tracker::shared().kill(id).await?;
             while self.running(id) {
                 tokio::time::sleep(POLL).await;
@@ -303,6 +314,21 @@ async fn step<T>(
         result = tokio::time::timeout(limit, f) => result.with_context(|| format!("{op} timed out"))?,
     }
 }
+async fn confirm_cleanup<L: Lifecycle>(
+    life: &L, id: &str, initial: Duration, recovery: Duration, on_retry: impl FnOnce(),
+) -> Result<()> {
+    let first = tokio::time::timeout(initial, life.stop(id)).await;
+    // A timeout/error can race tracker removal. Its current state is the
+    // authoritative confirmation, not the earlier future's timeout result.
+    if !life.running(id) { return Ok(()); }
+    if first.is_err() {
+        on_retry();
+        let _ = tokio::time::timeout(recovery, life.stop(id)).await;
+        if !life.running(id) { return Ok(()); }
+    }
+    bail!("shutdown/finalization not confirmed")
+}
+
 async fn drive<L: Lifecycle>(run: Arc<Run>, cfg: Config, items: Vec<Item>, life: &L) {
     let mut rx = run.stop.subscribe();
     let mut fatal = None;
@@ -357,11 +383,17 @@ async fn drive<L: Lifecycle>(run: Arc<Run>, cfg: Config, items: Vec<Item>, life:
         .await;
         run.phase(&item.name, "stopping");
         // Cleanup is not cancelled: Stop must wait for the owned child to exit.
-        let cleanup = tokio::time::timeout(STOP_TIMEOUT, life.stop(id)).await;
+        let cleanup = confirm_cleanup(life, id, STOP_TIMEOUT, CLEANUP_RECOVERY_TIMEOUT, || {
+            run.phase(&item.name, "waiting for background shutdown / profile save (automatic retry)");
+        }).await;
         let error = match cleanup {
-            Ok(Ok(())) if !life.running(id) => result.err().map(|e| format!("{e:#}")),
-            other => {
-                let e = format!("shutdown could not be confirmed ({other:?}); batch halted, close this profile before retrying");
+            Ok(()) => {
+                #[cfg(feature = "automation")]
+                crate::cdp::detach(id);
+                result.err().map(|e| format!("{e:#}"))
+            },
+            Err(e) => {
+                let e = format!("{e:#}; batch halted. The window may already be closed; background shutdown or profile saving is still pending. Use Retry cleanup before restarting.");
                 fatal = Some(e.clone());
                 Some(e)
             }
@@ -450,7 +482,7 @@ pub async fn stop_and_wait() -> Result<()> {
         return Ok(());
     };
     run.stop.send_replace(true);
-    tokio::time::timeout(STOP_TIMEOUT + Duration::from_secs(5), async {
+    tokio::time::timeout(STOP_TIMEOUT + CLEANUP_RECOVERY_TIMEOUT + Duration::from_secs(5), async {
         while run.state.lock().unwrap().running {
             tokio::time::sleep(POLL).await;
         }
@@ -460,12 +492,11 @@ pub async fn stop_and_wait() -> Result<()> {
     let snapshot = run.state.lock().unwrap().clone();
     if let Some(id) = snapshot.current_id.as_deref() {
         let _gate = launch_gate().lock().await;
-        tokio::time::timeout(STOP_TIMEOUT, Native.stop(id))
-            .await
-            .context("shutdown retry timed out")??;
-        if Native.running(id) {
-            bail!("profile {id} is still running");
-        }
+        confirm_cleanup(&Native, id, STOP_TIMEOUT, CLEANUP_RECOVERY_TIMEOUT, || {
+            run.change(|s| s.phase = "waiting for background shutdown / profile save (automatic retry)".into());
+        }).await?;
+        #[cfg(feature = "automation")]
+        crate::cdp::detach(id);
         run.change(|s| {
             s.error = None;
             s.current_id = None;
@@ -633,6 +664,7 @@ mod tests {
                     bail!("shutdown failure");
                 }
                 *self.live.lock().unwrap() = None;
+                if self.fail == Some("closed_stop") { bail!("close response lost after process exit"); }
                 Ok(())
             })
         }
@@ -724,6 +756,56 @@ mod tests {
         let fake = Fake::new(&run);
         drive(run, c, plan, &fake).await;
         assert!(fake.events.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn confirmed_exit_continues_batch_even_when_close_reply_failed() {
+        let run = Arc::new(Run::new(50));
+        let mut fake = Fake::new(&run);
+        fake.fail = Some("closed_stop");
+        let mut cfg = config();
+        let plan = resolve(&cfg, &profiles()).unwrap();
+        cfg.wait_seconds = 0;
+        drive(run.clone(), cfg, plan, &fake).await;
+        let state = run.state.lock().unwrap();
+        assert_eq!(state.completed, 50);
+        assert_eq!(state.failed, 0);
+        assert_eq!(state.phase, "complete");
+    }
+    struct DelayedCleanup {
+        pending: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+        closed_before_timeout: bool,
+    }
+    impl Lifecycle for DelayedCleanup {
+        fn start<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<()>> { Box::pin(async { Ok(()) }) }
+        fn navigate<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<()>> { Box::pin(async { Ok(()) }) }
+        fn running(&self, _: &str) -> bool { self.pending.load(std::sync::atomic::Ordering::SeqCst) }
+        fn stop<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    if self.closed_before_timeout { self.pending.store(false, std::sync::atomic::Ordering::SeqCst); }
+                    std::future::pending::<()>().await;
+                }
+                self.pending.store(false, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn cleanup_timeout_rechecks_exit_and_recovers_late_finalization() {
+        for closed in [true, false] {
+            let life = DelayedCleanup {
+                pending: std::sync::atomic::AtomicBool::new(true),
+                calls: std::sync::atomic::AtomicUsize::new(0), closed_before_timeout: closed,
+            };
+            let retried = std::sync::atomic::AtomicBool::new(false);
+            confirm_cleanup(&life, "test", Duration::from_millis(1), Duration::from_secs(1), || {
+                retried.store(true, std::sync::atomic::Ordering::SeqCst);
+            }).await.unwrap();
+            assert!(!life.running("test"));
+            assert_eq!(retried.load(std::sync::atomic::Ordering::SeqCst), !closed);
+        }
     }
     #[tokio::test]
     async fn failed_cleanup_halts_instead_of_overlapping() {
