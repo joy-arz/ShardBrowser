@@ -7,6 +7,13 @@ range (defaults `001`–`050`), an HTTP(S) URL, and a wait duration (default **1
 Close existing browser profiles and stop other automation projects, then choose
 **Start automation**.
 
+Each run closes all other open tabs/windows in that profile before navigating
+the automation tab to the configured URL. Open-tab state (including unsaved page
+forms) is discarded; cookies, saved logins, local storage, and history are retained.
+A blank automation tab stays open during cleanup to keep Chromium alive. If old
+tabs cannot be closed, that profile fails instead of opening another website tab.
+This applies only to sequential automation; manual launches keep their normal tabs.
+
 Browser windows open in the background without requesting keyboard focus, then
 close before the next profile starts. You can keep using another app or game;
 progress stays in the launcher. This uses the regular browser and saved profile,

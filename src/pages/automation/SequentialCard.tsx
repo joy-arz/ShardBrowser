@@ -47,7 +47,7 @@ export function SequentialCard() {
   return (
     <section className="mb-5 rounded-lg bg-bg-white-0 p-5 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200" aria-label="Sequential website automation">
       <h2 className="m-0 text-title-h6 text-text-strong-950">Sequential website automation</h2>
-      <p className="my-2 text-paragraph-sm text-text-soft-400">Open a website in each saved profile, one at a time, in a background window without switching away from your current task. Profiles come from this installation, including Portable Mode. Close other profiles and stop other automation before starting.</p>
+      <p className="my-2 text-paragraph-sm text-text-soft-400">Close existing tabs in each saved profile, then open the website in a single background tab, one profile at a time, without switching away from your current task. Profiles come from this installation, including Portable Mode. Close other profiles and stop other automation before starting.</p>
       <div className="grid gap-3 sm:grid-cols-3">
         <Input label="Start profile" value={start} onChange={e => setStart(e.target.value)} disabled={disabled} />
         <Input label="End profile" value={end} onChange={e => setEnd(e.target.value)} disabled={disabled} />

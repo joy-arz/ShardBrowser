@@ -609,7 +609,8 @@ Open **Automation → Sequential website automation**:
 3. Choose **Start automation**.
 
 Each existing profile opens a background window without requesting focus,
-connects through CDP, opens the URL, waits for page
+connects through CDP, closes its other tabs, opens the URL in the single remaining
+tab, waits for page
 readiness, waits the chosen duration, and stops before the next profile starts.
 Names resolve to their internal profile IDs; no separate profile store is created.
 

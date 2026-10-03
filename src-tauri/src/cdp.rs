@@ -352,6 +352,47 @@ pub async fn page_call(profile_id: &str, method: &str, params: Value) -> Result<
     s.call(method, params, Some(&page)).await
 }
 
+/// Sequential automation retains its attached blank tab, then closes every
+/// other page in this browser before navigating. Keeping one tab prevents a
+/// last-window shutdown. Browser-level services/extensions are not page tabs.
+pub async fn close_other_tabs(profile_id: &str) -> Result<()> {
+    let session = get(profile_id).ok_or_else(|| anyhow!("not attached"))?;
+    let page = session.page().ok_or_else(|| anyhow!("no page attached"))?;
+    let info = session.call("Target.getTargetInfo", json!({}), Some(&page)).await?;
+    let keep = info["targetInfo"]["targetId"].as_str()
+        .ok_or_else(|| anyhow!("automation tab has no target ID"))?;
+    // Closing is asynchronous: its acknowledgement precedes target destruction.
+    // Re-query until closure is confirmed, also catching late restored tabs.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut requested = std::collections::HashSet::new();
+    loop {
+        let targets = session.call("Target.getTargets", json!({}), None).await?;
+        let pages = targets["targetInfos"].as_array()
+            .ok_or_else(|| anyhow!("browser did not return its tab list"))?;
+        anyhow::ensure!(pages.iter().any(|t| t["targetId"].as_str() == Some(keep)),
+            "automation tab closed while clearing old tabs");
+        let other: Vec<_> = pages.iter()
+            .filter(|t| t["type"] == "page" && t["targetId"].as_str() != Some(keep))
+            .filter_map(|t| t["targetId"].as_str()).collect();
+        if other.is_empty() { return Ok(()); }
+        anyhow::ensure!(tokio::time::Instant::now() < deadline,
+            "could not confirm closure of {} previous tabs; website was not opened", other.len());
+        for target in other {
+            // A tab may already be disappearing. Request closure once, then
+            // confirm with the next tab list instead of resending in a tight loop.
+            if requested.insert(target.to_owned()) {
+                let _ = session.call("Target.closeTarget", json!({"targetId":target}), None).await;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn browser_call_for_test(profile_id: &str, method: &str, params: Value) -> Result<Value> {
+    get(profile_id).ok_or_else(|| anyhow!("not attached"))?.call(method, params, None).await
+}
+
 pub async fn start_screencast(profile_id: &str, max_width: u32, max_height: u32) -> Result<()> {
     page_call(
         profile_id,

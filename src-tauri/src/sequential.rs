@@ -227,6 +227,7 @@ impl Lifecycle for Native {
             #[cfg(feature = "automation")]
             {
                 use serde_json::json;
+                crate::cdp::close_other_tabs(id).await.context("clear previous profile tabs")?;
                 let nav = crate::cdp::page_call(id, "Page.navigate", json!({"url":url})).await?;
                 if let Some(e) = nav.get("errorText").and_then(|v| v.as_str()) {
                     bail!("navigation failed: {e}");
@@ -919,6 +920,31 @@ mod browser_smoke {
                     "background profile took focus: {focus}");
                 anyhow::ensure!(focus["result"]["value"]["headless"] == false,
                     "background mode must keep the regular browser: {focus}");
+
+                // Repeated automation navigations must clear old tabs while
+                // keeping the profile's authenticated-site storage intact.
+                crate::cdp::page_call(&ids[0], "Runtime.evaluate", serde_json::json!({
+                    "expression":"document.cookie='shardx_test=retained; Max-Age=86400; path=/'; localStorage.setItem('shardx_test','retained')"
+                })).await?;
+                for _ in 0..5 {
+                    for _ in 0..2 {
+                        crate::cdp::browser_call_for_test(&ids[0], "Target.createTarget", serde_json::json!({
+                            "url":format!("http://{addr}/old-tab"), "background":true
+                        })).await?;
+                    }
+                    let before = crate::cdp::browser_call_for_test(&ids[0], "Target.getTargets", serde_json::json!({})).await?;
+                    anyhow::ensure!(before["targetInfos"].as_array().unwrap().iter().filter(|t| t["type"] == "page").count() >= 3,
+                        "fixture did not create old tabs");
+                    Native.navigate(&ids[0], &format!("http://{addr}/test")).await?;
+                    let after = crate::cdp::browser_call_for_test(&ids[0], "Target.getTargets", serde_json::json!({})).await?;
+                    let pages: Vec<_> = after["targetInfos"].as_array().unwrap().iter().filter(|t| t["type"] == "page").collect();
+                    anyhow::ensure!(pages.len() == 1 && pages[0]["url"] == format!("http://{addr}/test"), "old tabs survived: {after}");
+                    let retained = crate::cdp::page_call(&ids[0], "Runtime.evaluate", serde_json::json!({
+                        "expression":"document.cookie.includes('shardx_test=retained') && localStorage.getItem('shardx_test') === 'retained'",
+                        "returnByValue":true
+                    })).await?;
+                    anyhow::ensure!(retained["result"]["value"] == true, "tab cleanup removed site storage");
+                }
 
                 anyhow::ensure!(crate::portable::local_cache_dir(&ids[0]).is_some_and(|p| p.is_dir() && !p.starts_with(&root)), "local cache was not separated");
                 stop_and_wait().await?;
