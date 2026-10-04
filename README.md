@@ -608,10 +608,12 @@ Open **Automation → Sequential website automation**:
 2. Enter the website URL and wait time (default **15 seconds**).
 3. Choose **Start automation**.
 
-Each existing profile opens a background window without requesting focus,
+Each existing profile runs in windowless Chromium with no desktop window,
 connects through CDP, closes its other tabs, opens the URL in the single remaining
 tab, waits for page
 readiness, waits the chosen duration, and stops before the next profile starts.
+Extra tabs are checked again after page load and before shutdown, including when
+you press Stop. Cookies and local storage stay in the profile.
 Names resolve to their internal profile IDs; no separate profile store is created.
 
 Progress and per-profile results appear in the card. **Stop** cancels the batch

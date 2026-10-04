@@ -64,10 +64,10 @@ pub async fn launch_profile_synced(
     ).await
 }
 
-/// Sequential batches create their window through CDP after startup, without
-/// activating it. Keep this separate from manual/API launch behavior.
+/// Sequential batches use modern headless Chromium so no desktop window can
+/// activate. Keep this separate from manual/API launch behavior.
 pub async fn launch_profile_background(profile_id: &str) -> Result<LaunchOutcome> {
-    launch_profile_with_window_mode(profile_id, true, false, None, 0, "", true).await
+    launch_profile_with_window_mode(profile_id, true, true, None, 0, "", true).await
 }
 
 async fn launch_profile_with_window_mode(

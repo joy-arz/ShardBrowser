@@ -14,20 +14,24 @@ A blank automation tab stays open during cleanup to keep Chromium alive. If old
 tabs cannot be closed, that profile fails instead of opening another website tab.
 This applies only to sequential automation; manual launches keep their normal tabs.
 
-Browser windows open in the background without requesting keyboard focus, then
-close before the next profile starts. You can keep using another app or game;
-progress stays in the launcher. This uses the regular browser and saved profile,
-not headless mode. Manual profile launches still open normally. A desktop/window
-manager can impose its own focus policy; Windows fullscreen-game focus behavior
-must also be verified on the target machine.
+Sequential automation uses **windowless Chromium (`--headless=new`)**. It runs the
+same ShardX engine and saved profile without displaying desktop windows, so tab
+creation, focus requests, and popups do not take focus from your current app.
+Progress stays in the launcher. Manual launches still open normal browser windows.
+Cookies and local storage remain in the profile; this is not an incognito session.
+Some websites treat headless browsers differently or require visible interaction.
+Use a manual launch for those interactions before running the batch.
 
-The runner suppresses Chromium's startup window (`--no-startup-window`) and creates
-its window through `Target.createTarget` with `newWindow: true, background: true`.
-It does not briefly focus the browser and then try to restore your previous app.
-If background creation fails, that profile is reported as failed and cleaned up;
-there is no foreground fallback. Remove conflicting extra arguments such as
-`--headless`, `--app`, `--restore-last-session`, `--auto-open-devtools-for-tabs`,
-`--start-fullscreen`, or `--kiosk` before starting a batch.
+The runner suppresses startup tabs (`--no-startup-window`) and creates its page
+through CDP. It never falls back to a visible browser during sequential automation.
+
+Extra tabs are cleared before navigation, after page load, and before shutdown.
+Cleanup waits for a quiet period to catch late restoration, retries close requests,
+and confirms disappearance. Stop makes a bounded cleanup attempt before closing
+Chromium, so a stuck tab does not prevent shutdown indefinitely.
+Remove conflicting extra arguments such as `--headless`, `--app`,
+`--restore-last-session`, `--auto-open-devtools-for-tabs`, `--start-fullscreen`,
+or `--kiosk` before starting a batch.
 
 Names are matched numerically and resolved to internal profile IDs. `009` comes
 before `010`. Missing names and ambiguous names (for example `1` and `001` both
@@ -103,8 +107,9 @@ cleanup failure halting, and bounded timeouts. The 50-profile lifecycle test use
 mock browser operations; it does not open 50 real browser windows.
 
 An opt-in real-engine test creates a fresh `ShardXData` beside the test executable,
-serves a local HTTP page, runs two real background profiles, and tests Stop with local cache on.
-It also checks that the waiting page is not focused and is not using headless mode.
+serves a local HTTP page, runs two real windowless profiles, and tests Stop with local cache on.
+It also exercises focus/popup requests, late-restored tabs, shutdown with extra tabs, and
+cookie/local-storage persistence after restarting the profile.
 It refuses to overwrite any pre-existing `ShardXData`. Run it **alone**, with no
 other test invocation using that same test executable directory:
 

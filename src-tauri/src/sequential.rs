@@ -256,6 +256,7 @@ impl Lifecycle for Native {
                         )
                         .await?;
                         if ready["result"]["value"].as_str() == Some("complete") {
+                            crate::cdp::close_other_tabs(id).await.context("clear tabs after page load")?;
                             return Ok(());
                         }
                     }
@@ -273,6 +274,13 @@ impl Lifecycle for Native {
         Box::pin(async move {
             #[cfg(feature = "automation")]
             if self.running(id) && crate::cdp::is_attached(id) {
+                // Close restored/extra tabs before shutdown so the next session
+                // does not inherit them. Browser.close remains the fallback when
+                // cleanup cannot finish; do not strand the profile during Stop.
+                match tokio::time::timeout(Duration::from_secs(3), crate::cdp::close_other_tabs(id)).await {
+                    Ok(Ok(())) => {},
+                    other => eprintln!("[automation] tab cleanup before shutdown incomplete: {other:?}"),
+                }
                 // Closing the window alone can leave a background Chromium alive.
                 // Give Browser.close time to flush before using the OS backstop.
                 let _ = tokio::time::timeout(Duration::from_secs(2), crate::cdp::close_browser(id)).await;
@@ -912,14 +920,24 @@ mod browser_smoke {
                     while active() && !status().phase.starts_with("waiting") { tokio::time::sleep(POLL).await; }
                 }).await?;
                 anyhow::ensure!(active(), "batch exited before cancellation: {:?}", status());
-                let focus = crate::cdp::page_call(&ids[0], "Runtime.evaluate", serde_json::json!({
-                    "expression":"({focused:document.hasFocus(),headless:navigator.userAgent.includes('HeadlessChrome')})",
-                    "returnByValue":true
+                // Even focus requests/popups remain within the windowless browser.
+                crate::cdp::page_call(&ids[0], "Runtime.evaluate", serde_json::json!({
+                    "expression":"window.focus(); const p = window.open('about:blank'); if (p) p.focus();",
+                    "userGesture":true
                 })).await?;
-                anyhow::ensure!(focus["result"]["value"]["focused"] == false,
-                    "background profile took focus: {focus}");
-                anyhow::ensure!(focus["result"]["value"]["headless"] == false,
-                    "background mode must keep the regular browser: {focus}");
+                // Simulate restoration arriving after the first empty tab list.
+                let late_id = ids[0].clone();
+                let late_url = format!("http://{addr}/late-restored");
+                let late = tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    crate::cdp::browser_call_for_test(&late_id, "Target.createTarget",
+                        serde_json::json!({"url":late_url,"background":true})).await
+                });
+                Native.navigate(&ids[0], &format!("http://{addr}/test")).await?;
+                late.await??;
+                let targets = crate::cdp::browser_call_for_test(&ids[0], "Target.getTargets", serde_json::json!({})).await?;
+                anyhow::ensure!(targets["targetInfos"].as_array().unwrap().iter().filter(|t| t["type"]=="page").count()==1,
+                    "late restored tab survived cleanup: {targets}");
 
                 // Repeated automation navigations must clear old tabs while
                 // keeping the profile's authenticated-site storage intact.
@@ -947,9 +965,29 @@ mod browser_smoke {
                 }
 
                 anyhow::ensure!(crate::portable::local_cache_dir(&ids[0]).is_some_and(|p| p.is_dir() && !p.starts_with(&root)), "local cache was not separated");
+                for _ in 0..2 {
+                    crate::cdp::browser_call_for_test(&ids[0], "Target.createTarget",
+                        serde_json::json!({"url":format!("http://{addr}/on-stop"),"background":true})).await?;
+                }
                 stop_and_wait().await?;
                 anyhow::ensure!(status().phase=="stopped" && status().results.len()==1,"Stop advanced to another profile: {:?}",status());
                 anyhow::ensure!(crate::process::Tracker::shared().running().is_empty(),"Stop left a child running");
+                // Restart the same durable profile: windowless mode must retain its
+                // cookies/storage, and shutdown extras must not accumulate.
+                start(Config {start:1,end:1,url:format!("http://{addr}/test"),wait_seconds:60}).await?;
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    while active() && !status().phase.starts_with("waiting") { tokio::time::sleep(POLL).await; }
+                }).await?;
+                anyhow::ensure!(active(), "restart failed: {:?}", status());
+                let retained = crate::cdp::page_call(&ids[0], "Runtime.evaluate", serde_json::json!({
+                    "expression":"document.cookie.includes('shardx_test=retained') && localStorage.getItem('shardx_test') === 'retained'",
+                    "returnByValue":true
+                })).await?;
+                anyhow::ensure!(retained["result"]["value"]==true, "windowless profile did not retain storage across restart");
+                let targets = crate::cdp::browser_call_for_test(&ids[0], "Target.getTargets", serde_json::json!({})).await?;
+                anyhow::ensure!(targets["targetInfos"].as_array().unwrap().iter().filter(|t|t["type"]=="page").count()==1,
+                    "shutdown extras survived: {targets}");
+                stop_and_wait().await?;
                 for id in &ids { crate::portable::remove_local_cache_for(id); }
                 Ok::<(),anyhow::Error>(())
             }.await;

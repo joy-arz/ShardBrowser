@@ -117,7 +117,7 @@ where
     attach_with_window_mode(profile_id, ws_url, on_frame, on_nav, on_event, false).await
 }
 
-/// Create a fresh, inactive window for a sequential batch. Do not activate an
+/// Create the automation page in the windowless sequential browser. Do not activate an
 /// existing target or fall back to foreground creation if the engine rejects it.
 pub async fn attach_background(profile_id: String, ws_url: String) -> Result<()> {
     attach_with_window_mode(profile_id, ws_url, |_| {}, |_, _| {}, |_, _| {}, true).await
@@ -275,7 +275,7 @@ where
         });
     }
 
-    // Background runs create their own inactive window. Other callers still
+    // Sequential runs create their page in modern headless Chromium. Other callers still
     // attach to the first existing page. flatten:true shares this socket.
     let page_target = if background {
         session
@@ -364,7 +364,8 @@ pub async fn close_other_tabs(profile_id: &str) -> Result<()> {
     // Closing is asynchronous: its acknowledgement precedes target destruction.
     // Re-query until closure is confirmed, also catching late restored tabs.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut requested = std::collections::HashSet::new();
+    let mut requested = std::collections::HashMap::new();
+    let mut quiet_since = None;
     loop {
         let targets = session.call("Target.getTargets", json!({}), None).await?;
         let pages = targets["targetInfos"].as_array()
@@ -374,13 +375,20 @@ pub async fn close_other_tabs(profile_id: &str) -> Result<()> {
         let other: Vec<_> = pages.iter()
             .filter(|t| t["type"] == "page" && t["targetId"].as_str() != Some(keep))
             .filter_map(|t| t["targetId"].as_str()).collect();
-        if other.is_empty() { return Ok(()); }
+        if other.is_empty() {
+            let since = quiet_since.get_or_insert_with(tokio::time::Instant::now);
+            if since.elapsed() >= std::time::Duration::from_millis(500) { return Ok(()); }
+        } else {
+            quiet_since = None;
+        }
         anyhow::ensure!(tokio::time::Instant::now() < deadline,
-            "could not confirm closure of {} previous tabs; website was not opened", other.len());
+            "could not confirm closure of {} extra tabs", other.len());
         for target in other {
-            // A tab may already be disappearing. Request closure once, then
-            // confirm with the next tab list instead of resending in a tight loop.
-            if requested.insert(target.to_owned()) {
+            // A tab may already be disappearing. Retry refused/transient closes
+            // at a bounded rate, and confirm disappearance rather than trusting ACKs.
+            if requested.get(target).is_none_or(|at: &tokio::time::Instant|
+                at.elapsed() >= std::time::Duration::from_millis(500)) {
+                requested.insert(target.to_owned(), tokio::time::Instant::now());
                 let _ = session.call("Target.closeTarget", json!({"targetId":target}), None).await;
             }
         }
